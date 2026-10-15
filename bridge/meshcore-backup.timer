@@ -1,0 +1,10 @@
+[Unit]
+Description=Nightly MeshCore bridge DB backup
+
+[Timer]
+OnCalendar=*-*-* 03:40
+RandomizedDelaySec=10m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

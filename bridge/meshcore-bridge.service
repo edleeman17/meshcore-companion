@@ -1,0 +1,23 @@
+# systemd *user* unit: no root needed. Enable lingering once so it starts at boot:
+#   loginctl enable-linger $USER
+# Installed to ~/.config/systemd/user/ by deploy.sh.
+[Unit]
+Description=MeshCore Companion bridge (BLE radio -> HTTP API)
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/meshcore-bridge
+EnvironmentFile=%h/.config/meshcore-bridge.env
+Environment=DATA_DIR=%h/.local/share/meshcore-bridge
+ExecStart=%h/meshcore-bridge/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8190 --no-access-log
+StandardOutput=append:%h/.local/share/meshcore-bridge/bridge.log
+StandardError=inherit
+Restart=always
+RestartSec=5
+# Keep it polite on small hosts (e.g. a Pi that also runs other services)
+MemoryMax=300M
+CPUQuota=50%
+Nice=5
+
+[Install]
+WantedBy=default.target

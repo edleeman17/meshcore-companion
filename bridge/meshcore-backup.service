@@ -1,0 +1,8 @@
+[Unit]
+Description=Back up the MeshCore Companion database
+
+[Service]
+Type=oneshot
+EnvironmentFile=-%h/.config/meshcore-bridge.env
+ExecStart=%h/meshcore-bridge/backup.sh
+Nice=10

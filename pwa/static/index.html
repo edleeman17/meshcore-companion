@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MeshCore Companion</title>
+<meta name="theme-color" content="#fbfaf7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#16161d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="MeshCore">
+<script>
+  // Apply a saved Light/Dark choice before first paint (System = no attribute).
+  try { const t = localStorage.getItem("theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch {}
+</script>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="vendor/uPlot.min.css">
+<link rel="stylesheet" href="vendor/leaflet.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <button class="back" id="back" hidden aria-label="Back">‹</button>
+  <h1 id="title">MeshCore</h1>
+  <button class="hdr-btn" id="info" hidden aria-label="Details">ⓘ</button>
+  <span class="pill" id="conn" title="Radio link" role="status">…</span>
+</header>
+
+<div id="offline" class="banner" hidden role="alert"></div>
+<main>
+  <!-- Chats -->
+  <section id="v-chats" class="view">
+    <div class="toolbar">
+      <input id="search" class="search" type="search" placeholder="Search messages" autocomplete="off" aria-label="Search messages">
+      <button id="add-chan" type="button" class="btn" aria-expanded="false">+ Channel</button>
+    </div>
+    <form id="add-chan-form" class="form panel" hidden>
+      <label>Channel name or link
+        <input name="name" placeholder="#general, a private name, or a meshcore:// link" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+      <label id="add-chan-key" hidden>Key to join a private channel (32 hex) — leave blank to create a new one
+        <input name="secret" inputmode="latin" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+      <small class="hint" id="add-chan-hint">A name starting with # is a public hashtag channel. A plain name makes a private channel.</small>
+      <div class="row-actions"><button type="submit" class="btn primary">Add channel</button><button type="button" class="btn" id="add-chan-cancel">Cancel</button></div>
+    </form>
+    <div id="results" class="list" hidden></div>
+    <div id="chat-home">
+      <div id="convs" class="list"></div>
+      <details class="fold" id="quiet-wrap" hidden>
+        <summary>Quiet channels <span id="quiet-count" class="muted"></span></summary>
+        <div id="quiet" class="list"></div>
+      </details>
+      <details class="fold">
+        <summary>Discover channels <span id="disc-note" class="muted"></span></summary>
+        <div id="discovered" class="list"></div>
+        <form id="guess" class="inline">
+          <input id="guess-name" placeholder="Try a name, e.g. #general" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Channel name to check">
+          <button class="btn primary">Check</button>
+        </form>
+      </details>
+    </div>
+    <div id="people-wrap">
+      <h2 class="sub">Start a conversation</h2>
+      <div id="people" class="list"></div>
+    </div>
+  </section>
+
+  <!-- One conversation -->
+  <section id="v-thread" class="view" hidden>
+    <div id="thread-info" class="card" hidden></div>
+    <div id="hidden-bar" class="hint" hidden></div>
+    <div id="msgs" class="msgs" aria-live="polite"></div>
+    <form id="composer" class="composer">
+      <button type="button" id="share-card" class="share-card" aria-label="Insert my contact card" title="Insert my contact card">👤</button>
+      <button type="button" id="sign-toggle" class="share-card" hidden aria-pressed="false" aria-label="Sign this message" title="Sign this message so people can verify it's really you">🔏</button>
+      <textarea id="text" rows="1" maxlength="700" placeholder="Message" enterkeyhint="send" aria-label="Message"></textarea>
+      <span id="count" class="count" aria-live="polite">140</span>
+      <button type="submit" aria-label="Send">↑</button>
+    </form>
+  </section>
+
+  <!-- Contacts -->
+  <section id="v-contacts" class="view" hidden>
+    <div class="row-actions">
+      <button id="scan-qr" class="btn primary">Scan QR code</button>
+      <button id="my-qr" class="btn">My QR code</button>
+    </div>
+    <h2 class="sub">Your contacts <small id="contact-count"></small></h2>
+    <div class="seg" id="ctype" role="tablist">
+      <button data-t="" class="on">All</button><button data-t="1">People</button><button data-t="2">Repeaters</button><button data-t="3">Rooms</button>
+    </div>
+    <div id="contact-list" class="list"></div>
+    <h2 class="sub">Nearby now <small id="nearby-note"></small></h2>
+    <div class="seg" id="nearby-range"><button data-h="1" class="on">1h</button><button data-h="24">24h</button></div>
+    <div id="nearby" class="list"></div>
+    <div id="pending-wrap" hidden>
+      <h2 class="sub">Heard adverts <small>not yet contacts</small></h2>
+      <div id="pending" class="list"></div>
+    </div>
+    <details class="fold">
+      <summary>Add or share a contact</summary>
+      <form id="import" class="inline">
+        <input id="uri" placeholder="Paste a meshcore:// contact or channel link" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="meshcore link">
+        <button class="btn primary">Add</button>
+      </form>
+      <div class="row-actions"><button id="my-uri" class="btn">Share my contact link</button></div>
+    </details>
+    <details class="fold">
+      <summary>Verified senders</summary>
+      <p class="hint">Channel names can be faked. Senders you confirm are flagged if their name ever arrives from somewhere else.</p>
+      <div id="verified-list" class="list"></div>
+    </details>
+    <details class="fold">
+      <summary>Message delivery</summary>
+      <div class="scroll-x"><table class="tbl" id="delivery"><thead><tr><th>Contact</th><th>Sent</th><th>✓</th><th>✗</th><th>Avg RTT</th></tr></thead><tbody></tbody></table></div>
+    </details>
+  </section>
+
+  <!-- One contact -->
+  <section id="v-contact" class="view" hidden>
+    <div id="c-hero" class="hero"></div>
+    <div class="actions" id="c-actions"></div>
+    <dl class="kv" id="c-kv"></dl>
+    <h2 class="sub">Diagnostics</h2>
+    <div class="actions" id="c-diag"></div>
+    <div id="c-out" class="result" hidden></div>
+    <div id="c-bw"></div>
+    <details class="fold" id="c-route-wrap">
+      <summary>Advanced routing</summary>
+      <div id="c-route"></div>
+    </details>
+    <div id="c-admin" hidden>
+      <h2 class="sub">Admin</h2>
+      <form id="login" class="inline">
+        <input id="pw" type="password" placeholder="Password (blank = guest)" autocomplete="off" aria-label="Admin password">
+        <button class="btn primary">Log in</button>
+      </form>
+      <pre id="console" class="console"></pre>
+      <form id="cli" class="inline">
+        <input id="cmd" placeholder="Command, e.g. ver, get radio, neighbors" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Command">
+        <button class="btn primary">Run</button>
+      </form>
+    </div>
+  </section>
+
+  <!-- Placement mode -->
+  <section id="v-placement" class="view" hidden>
+    <div id="pl-head" class="pl-head"></div>
+    <div class="row-actions">
+      <button id="pl-new" class="btn primary">Start new spot</button>
+      <button id="pl-test" class="btn">Two-way test</button>
+      <button id="pl-save" class="btn">Save spot</button>
+    </div>
+    <label class="check"><input id="pl-beep" type="checkbox"> Beep when a spot beats your best so far</label>
+    <p class="hint">Move the radio, tap <b>Start new spot</b>, then give it a minute. The bars fill from packets you already receive, so listening uses no airtime. <b>Two-way test</b> also checks each repeater can hear <i>you</i>.</p>
+    <h2 class="sub">Repeaters you hear <small id="pl-since"></small></h2>
+    <div id="pl-list" class="pl-list"></div>
+    <div id="pl-other-wrap" hidden>
+      <h2 class="sub">Also heard directly <small>not repeaters</small></h2>
+      <div id="pl-other" class="pl-list"></div>
+    </div>
+    <h2 class="sub">Saved spots</h2>
+    <div id="pl-spots"></div>
+  </section>
+
+  <!-- Desktop: right-hand pane when nothing is open -->
+  <section id="v-pick" class="view" hidden><p class="empty" id="pick-text"></p></section>
+
+  <!-- Map -->
+  <section id="v-map" class="view view-wide" hidden>
+    <div id="map"></div>
+  </section>
+
+  <!-- Signal -->
+  <section id="v-signal" class="view" hidden>
+    <a class="cta" href="#/placement"><span class="cta-ico" aria-hidden="true">📍</span>
+      <span><b>Placement mode</b><small>Live signal to every repeater near you, to find the best spot for your antenna</small></span></a>
+    <div class="seg" id="range">
+      <button data-r="1h">1h</button><button data-r="6h">6h</button><button data-r="24h" class="on">24h</button><button data-r="7d">7d</button>
+    </div>
+    <div id="health"></div>
+    <div class="chart-grid">
+      <div class="chart-card"><h2 class="sub">Best repeater SNR <small>hourly average</small></h2>
+        <div class="chart" id="c-trend"></div></div>
+      <div class="chart-card"><h2 class="sub">Packets lost to errors <small>% per hour</small></h2>
+        <div class="chart" id="c-err"></div></div>
+      <div class="chart-card"><h2 class="sub">Your airtime <small>% of each hour · duty-cycle limit 10%</small></h2>
+        <div class="chart" id="c-air"></div></div>
+      <div class="chart-card"><h2 class="sub">Packet SNR / RSSI</h2>
+        <div class="chart" id="c-pkts"></div></div>
+      <div class="chart-card"><h2 class="sub">Noise floor</h2>
+        <div class="chart" id="c-noise"></div></div>
+    </div>
+    <h2 class="sub">Who you hear <small>last hop</small></h2>
+    <div class="scroll-x"><table class="tbl" id="neigh"><thead><tr><th>Node</th><th>Pkts</th><th>SNR</th><th>RSSI</th><th>Last</th></tr></thead><tbody></tbody></table></div>
+    <h2 class="sub">Hops</h2>
+    <div id="hops" class="hops"></div>
+    <h2 class="sub">Live packets</h2>
+    <div class="scroll-x"><table class="tbl" id="live"><thead><tr><th>Time</th><th>Type</th><th>SNR</th><th>RSSI</th><th>Via</th></tr></thead>
+      <tbody><tr class="empty-row"><td colspan="5" class="empty">Waiting for packets…</td></tr></tbody></table></div>
+  </section>
+
+  <!-- Radio -->
+  <section id="v-radio" class="view" hidden>
+   <div class="cols">
+   <div class="col">
+    <div id="kv" class="stats"></div>
+    <h2 class="sub">Battery</h2>
+    <div class="chart" id="c-bat"></div>
+
+    <h2 class="sub">Radio settings</h2>
+    <form id="settings" class="form">
+      <label>Name <input name="name" autocomplete="off"></label>
+      <label>TX power (dBm) <input name="tx_power" type="number" min="1" max="30"></label>
+      <div class="two">
+        <label>Latitude <input name="lat" type="number" step="any"></label>
+        <label>Longitude <input name="lon" type="number" step="any"></label>
+      </div>
+      <label class="check"><input name="manual_add_contacts" type="checkbox"> Only add contacts manually</label>
+      <label class="check"><input name="auto_manage" type="checkbox"> Auto-manage contacts</label>
+      <small class="hint">Adds people and rooms you hear, never keeps repeaters, and rotates out the oldest non-favourite person when full. Favourites (★) are never removed.</small>
+      <label>Keep at most this many people <input name="people_cap" type="number" min="10" max="300" placeholder="200"></label>
+      <label>Fixed Bluetooth PIN <input name="ble_pin" inputmode="numeric" pattern="[0-9]{6}" placeholder="6 digits (blank = keep)"></label>
+      <small class="hint">A fixed PIN stops pairing breaking every time the radio reboots. Applies after a reboot; then re-pair the bridge host with it.</small>
+      <button class="btn primary">Save to radio</button>
+    </form>
+   </div>
+   <div class="col">
+
+    <h2 class="sub">Notifications</h2>
+    <div class="row-actions">
+      <button id="notify" class="btn primary">Enable notifications</button>
+      <button id="test-push" class="btn">Send a test</button>
+    </div>
+    <p class="hint">Direct messages always notify. Choose channels too:</p>
+    <div id="chan-notify" class="checks"></div>
+    <label class="check"><input id="notify-offline" type="checkbox"> Tell me when my radio goes offline</label>
+    <p class="hint">After 5 minutes without contact (power bank flat, unplugged, out of Bluetooth range), and again when it's back.</p>
+    <label class="check"><input id="notify-back" type="checkbox"> Tell me when a favourite (★) is back in range</label>
+    <p class="hint">Alerts when a favourite you haven't heard from in 6 hours or more shows up again: an advert, a message, or a favourite repeater relaying.</p>
+    <h2 class="sub">Repeater batteries <small>checked every 3 hours</small></h2>
+    <div id="bw-list"></div>
+
+    <h2 class="sub">Spam filters</h2>
+    <form id="filters" class="form">
+      <label>Hide senders matching (one regex per line)
+        <textarea name="sender_regex" rows="3" spellcheck="false" autocapitalize="off"></textarea></label>
+      <label>Hide messages whose text matches (one regex per line)
+        <textarea name="text_regex" rows="2" spellcheck="false" autocapitalize="off"></textarea></label>
+      <label class="check"><input name="flood" type="checkbox"> Hide the same text sent from 3+ different names within 10 minutes (bot floods)</label>
+      <small class="hint">Hidden messages aren't deleted. They skip unread counts and notifications, and each chat has a "show" link.</small>
+      <button class="btn primary">Save and apply to the last 7 days</button>
+    </form>
+
+    <h2 class="sub">Appearance</h2>
+    <div class="seg" id="theme">
+      <button data-theme="system" class="on">System</button><button data-theme="light">Light</button><button data-theme="dark">Dark</button>
+    </div>
+
+    <h2 class="sub">Maintenance</h2>
+    <div class="row-actions">
+      <button id="advert" class="btn">Advert (zero-hop)</button>
+      <button id="advert-flood" class="btn">Advert (flood)</button>
+      <button id="reboot" class="btn danger">Reboot radio</button>
+    </div>
+   </div>
+   </div>
+  </section>
+</main>
+
+<dialog id="sheet" aria-labelledby="sheet-title"><div id="sheet-body"></div><form method="dialog"><button class="btn close">Close</button></form></dialog>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+<nav class="tabs" aria-label="Main">
+  <span class="brand" aria-hidden="true">MeshCore</span>
+  <a href="#/chats" data-tab="chats"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H9l-5 4z"/></svg>Chats</a>
+  <a href="#/contacts" data-tab="contacts"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg>Contacts<span id="pend-badge" class="dot" hidden></span></a>
+  <a href="#/map" data-tab="map"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6l6-2 6 2 6-2v14l-6 2-6-2-6 2z"/><path d="M9 4v14M15 6v14"/></svg>Map</a>
+  <a href="#/signal" data-tab="signal"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20v-4M9 20v-8M14 20V8M19 20V4"/></svg>Signal</a>
+  <a href="#/radio" data-tab="radio"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="8" width="14" height="13"/><path d="M9 8l6-5M9 13h6M9 17h6"/></svg>Radio</a>
+</nav>
+
+<script src="vendor/uPlot.iife.min.js"></script>
+<script src="vendor/leaflet.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

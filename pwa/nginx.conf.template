@@ -1,0 +1,33 @@
+# nginx config for the PWA. ${BRIDGE_URL} is substituted at container start
+# (nginx:alpine renders /etc/nginx/templates/*.template with envsubst).
+server {
+  listen 80;
+  root /usr/share/nginx/html;
+
+  # API + live stream -> the bridge. SSE needs buffering off and a long read
+  # timeout (the bridge pings every 20 s).
+  location /api/ {
+    proxy_pass ${BRIDGE_URL};
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 1h;
+  }
+
+  location = /sw.js {
+    add_header Cache-Control "no-cache";
+    try_files $uri =404;
+  }
+
+  location = /manifest.webmanifest {
+    default_type application/manifest+json;
+    try_files $uri =404;
+  }
+
+  location / {
+    add_header Cache-Control "no-cache";
+    try_files $uri /index.html;
+  }
+}

@@ -1,0 +1,12 @@
+# Front end only. The bridge runs directly on the Bluetooth host (see README),
+# because BLE from inside a container is more trouble than it's worth.
+# Put this behind HTTPS (Caddy/Traefik/your reverse proxy): service workers and
+# Web Push only work on a secure origin.
+services:
+  pwa:
+    build: ./pwa
+    ports:
+      - "8080:80"
+    environment:
+      BRIDGE_URL: http://192.0.2.10:8190   # <- your bridge host:port
+    restart: unless-stopped
