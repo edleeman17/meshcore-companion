@@ -32,9 +32,17 @@ A self-hosted web app for your [MeshCore](https://meshcore.io) LoRa radio. A sma
 
 ## Features
 
-**New: 🖥️ Desktop layout** — on a laptop or desktop browser (1024 px and wider) the app gets a sidebar instead of bottom tabs, Chats and Contacts open beside their list instead of on a new page, and Signal and Radio use two columns. `Esc` closes the open chat, `/` jumps to search. Phones and tablets are unchanged.
+**New: 🔎 Packet inspector** — Signal → Live packets: tap any packet to see its raw bytes as a colour-coded hex dump, with every field named and explained (header, route, each hop by repeater name, advert key/location/name, ACKs, trace SNRs). Channel traffic is **decrypted** with every key the app knows (your channels, Public, discovered `#hashtags`), and signature packets are split into key id, signed time and signature. Filter by type, pause the log, copy the hex, or **Show route on map**. Raw packets are kept for 7 days.
 
-**New: 📍 Placement mode** — find the best spot for your antenna. Signal → Placement mode shows a live bar for every repeater you hear directly, built from packets you already receive (no extra airtime). Move the radio, tap **Start new spot**, give it a minute; **Two-way test** checks each repeater hears *you* too. Save each spot and the app compares them in a table and marks the best, with an optional beep when a spot beats your best so far.
+**New: 🗺️ Live packet trails and mesh links** — on the Map, each packet you receive is replayed as a dot travelling sender → repeaters → you. Tick **Links heard (24 h)** to draw the repeater-to-repeater network built from every path you've heard: thicker lines carry more traffic, and your own links are coloured by SNR. Hop IDs are 1–2 byte key prefixes, so each is matched to the located node nearest the next hop (repeaters preferred).
+
+**New: ✍️ Signed filter** — Live packets can show only signed traffic: signature packets and every heard copy of the post they sign, marked with who signed.
+
+**New: menus for Signal and Radio** — both open on a short menu (Charts, Who you hear, Live packets… / Settings, Notifications, Spam filters…), each feature on its own page.
+
+**🖥️ Desktop layout** — on a laptop or desktop browser (1024 px and wider) the app gets a sidebar instead of bottom tabs, Chats and Contacts open beside their list instead of on a new page, and charts sit in two columns. `Esc` closes the open chat, `/` jumps to search. Phones and tablets are unchanged.
+
+**📍 Placement mode** — find the best spot for your antenna. Signal → Placement mode shows a live bar for every repeater you hear directly, built from packets you already receive (no extra airtime). Move the radio, tap **Start new spot**, give it a minute; **Two-way test** checks each repeater hears *you* too. Save each spot and the app compares them in a table and marks the best, with an optional beep when a spot beats your best so far.
 
 **Chat**
 - DMs and channels (Public, `#hashtag` and private), with live updates.
@@ -73,7 +81,8 @@ A self-hosted web app for your [MeshCore](https://meshcore.io) LoRa radio. A sma
 - **Link health card:** judged on the last hour, with every number graded 🟢 good / 🟠 ok / 🔴 bad in plain words: best repeater, packets lost to errors, airtime, noise floor, and an overall verdict.
 - Charts: best-repeater SNR trend, error % per hour, packet SNR/RSSI scatter, noise floor, battery.
 - **Airtime vs the 10% duty-cycle limit** (EU/UK 869.4–869.65 MHz), plus how busy the mesh is.
-- A "who you hear" table (last-hop repeaters), a hop histogram and a live packet log.
+- A "who you hear" table (last-hop repeaters), a hop histogram and a live packet log with type and ✍️ Signed filters.
+- **Packet inspector:** hex dump + decoded fields for any packet, channel payloads decrypted.
 - Per-contact DM delivery stats: delivered, failed, and average round-trip time.
 - Prometheus metrics at `/api/metrics`.
 

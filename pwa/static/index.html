@@ -175,12 +175,19 @@
 
   <!-- Signal -->
   <section id="v-signal" class="view" hidden>
-    <a class="cta" href="#/placement"><span class="cta-ico" aria-hidden="true">📍</span>
-      <span><b>Placement mode</b><small>Live signal to every repeater near you, to find the best spot for your antenna</small></span></a>
-    <div class="seg" id="range">
-      <button data-r="1h">1h</button><button data-r="6h">6h</button><button data-r="24h" class="on">24h</button><button data-r="7d">7d</button>
+    <div class="sub-home">
+      <div id="health"></div>
+      <nav class="menu" aria-label="Signal">
+        <a href="#/placement"><span aria-hidden="true">📍</span><span><b>Placement mode</b><small>Live signal to every repeater, to find the best antenna spot</small></span></a>
+        <a href="#/signal/charts"><span aria-hidden="true">📈</span><span><b>Charts</b><small>SNR, errors, airtime, noise floor</small></span></a>
+        <a href="#/signal/heard"><span aria-hidden="true">📡</span><span><b>Who you hear</b><small>Last-hop repeaters and hop counts</small></span></a>
+        <a href="#/signal/packets"><span aria-hidden="true">🔎</span><span><b>Live packets</b><small>Every packet as it arrives, with the inspector</small></span></a>
+      </nav>
     </div>
-    <div id="health"></div>
+    <div class="subpage" data-sub="charts" data-title="Charts" hidden>
+      <div class="range-slot"><div class="seg" id="range">
+        <button data-r="1h">1h</button><button data-r="6h">6h</button><button data-r="24h" class="on">24h</button><button data-r="7d">7d</button>
+      </div></div>
     <div class="chart-grid">
       <div class="chart-card"><h2 class="sub">Best repeater SNR <small>hourly average</small></h2>
         <div class="chart" id="c-trend"></div></div>
@@ -193,24 +200,44 @@
       <div class="chart-card"><h2 class="sub">Noise floor</h2>
         <div class="chart" id="c-noise"></div></div>
     </div>
-    <h2 class="sub">Who you hear <small>last hop</small></h2>
+    </div>
+    <div class="subpage" data-sub="heard" data-title="Who you hear" hidden>
+      <div class="range-slot"></div>
     <div class="scroll-x"><table class="tbl" id="neigh"><thead><tr><th>Node</th><th>Pkts</th><th>SNR</th><th>RSSI</th><th>Last</th></tr></thead><tbody></tbody></table></div>
     <h2 class="sub">Hops</h2>
     <div id="hops" class="hops"></div>
-    <h2 class="sub">Live packets</h2>
+    </div>
+    <div class="subpage" data-sub="packets" data-title="Live packets" hidden>
+    <p class="hint">Tap a packet to look inside it.</p>
+    <div class="pkt-tools">
+      <div class="seg" id="pkt-type" role="group" aria-label="Packet type">
+        <button class="on" data-t="">All</button><button data-t="GRP_TXT">Channel</button><button data-t="TEXT_MSG">DM</button><button data-t="ADVERT">Advert</button><button data-t="ACK">Ack</button><button data-t="SIGNED">✍️ Signed</button>
+      </div>
+      <button class="btn sm" id="pkt-pause" aria-pressed="false">Pause</button>
+    </div>
     <div class="scroll-x"><table class="tbl" id="live"><thead><tr><th>Time</th><th>Type</th><th>SNR</th><th>RSSI</th><th>Via</th></tr></thead>
       <tbody><tr class="empty-row"><td colspan="5" class="empty">Waiting for packets…</td></tr></tbody></table></div>
+    </div>
   </section>
 
   <!-- Radio -->
   <section id="v-radio" class="view" hidden>
-   <div class="cols">
-   <div class="col">
+    <div class="sub-home">
     <div id="kv" class="stats"></div>
-    <h2 class="sub">Battery</h2>
+      <nav class="menu" aria-label="Radio">
+        <a href="#/radio/battery"><span aria-hidden="true">🔋</span><span><b>Battery</b><small>Charge history</small></span></a>
+        <a href="#/radio/settings"><span aria-hidden="true">⚙️</span><span><b>Radio settings</b><small>Name, TX power, location, contacts, PIN</small></span></a>
+        <a href="#/radio/notify"><span aria-hidden="true">🔔</span><span><b>Notifications</b><small>Channels, offline and back-in-range alerts</small></span></a>
+        <a href="#/radio/batteries"><span aria-hidden="true">🪫</span><span><b>Repeater batteries</b><small>Watched repeaters, checked every 3 hours</small></span></a>
+        <a href="#/radio/filters"><span aria-hidden="true">🚫</span><span><b>Spam filters</b><small>Hide senders, text and bot floods</small></span></a>
+        <a href="#/radio/appearance"><span aria-hidden="true">🎨</span><span><b>Appearance</b><small>Light, dark or system</small></span></a>
+        <a href="#/radio/maintenance"><span aria-hidden="true">🛠️</span><span><b>Maintenance</b><small>Adverts and reboot</small></span></a>
+      </nav>
+    </div>
+    <div class="subpage" data-sub="battery" data-title="Battery" hidden>
     <div class="chart" id="c-bat"></div>
-
-    <h2 class="sub">Radio settings</h2>
+    </div>
+    <div class="subpage" data-sub="settings" data-title="Radio settings" hidden>
     <form id="settings" class="form">
       <label>Name <input name="name" autocomplete="off"></label>
       <label>TX power (dBm) <input name="tx_power" type="number" min="1" max="30"></label>
@@ -226,10 +253,8 @@
       <small class="hint">A fixed PIN stops pairing breaking every time the radio reboots. Applies after a reboot; then re-pair the bridge host with it.</small>
       <button class="btn primary">Save to radio</button>
     </form>
-   </div>
-   <div class="col">
-
-    <h2 class="sub">Notifications</h2>
+    </div>
+    <div class="subpage" data-sub="notify" data-title="Notifications" hidden>
     <div class="row-actions">
       <button id="notify" class="btn primary">Enable notifications</button>
       <button id="test-push" class="btn">Send a test</button>
@@ -240,10 +265,11 @@
     <p class="hint">After 5 minutes without contact (power bank flat, unplugged, out of Bluetooth range), and again when it's back.</p>
     <label class="check"><input id="notify-back" type="checkbox"> Tell me when a favourite (★) is back in range</label>
     <p class="hint">Alerts when a favourite you haven't heard from in 6 hours or more shows up again: an advert, a message, or a favourite repeater relaying.</p>
-    <h2 class="sub">Repeater batteries <small>checked every 3 hours</small></h2>
+    </div>
+    <div class="subpage" data-sub="batteries" data-title="Repeater batteries" hidden>
     <div id="bw-list"></div>
-
-    <h2 class="sub">Spam filters</h2>
+    </div>
+    <div class="subpage" data-sub="filters" data-title="Spam filters" hidden>
     <form id="filters" class="form">
       <label>Hide senders matching (one regex per line)
         <textarea name="sender_regex" rows="3" spellcheck="false" autocapitalize="off"></textarea></label>
@@ -253,20 +279,19 @@
       <small class="hint">Hidden messages aren't deleted. They skip unread counts and notifications, and each chat has a "show" link.</small>
       <button class="btn primary">Save and apply to the last 7 days</button>
     </form>
-
-    <h2 class="sub">Appearance</h2>
+    </div>
+    <div class="subpage" data-sub="appearance" data-title="Appearance" hidden>
     <div class="seg" id="theme">
       <button data-theme="system" class="on">System</button><button data-theme="light">Light</button><button data-theme="dark">Dark</button>
     </div>
-
-    <h2 class="sub">Maintenance</h2>
+    </div>
+    <div class="subpage" data-sub="maintenance" data-title="Maintenance" hidden>
     <div class="row-actions">
       <button id="advert" class="btn">Advert (zero-hop)</button>
       <button id="advert-flood" class="btn">Advert (flood)</button>
       <button id="reboot" class="btn danger">Reboot radio</button>
     </div>
-   </div>
-   </div>
+    </div>
   </section>
 </main>
 

@@ -20,6 +20,7 @@ from .hub import Hub
 from .radio import Radio
 from .qrz import CALL_RE, QRZ
 from .watch import OTA_TIMEOUT, Watch
+from . import topology
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logging.getLogger("meshcore").setLevel(logging.WARNING)
@@ -912,6 +913,48 @@ async def resend(mid: int):
 def _mean(xs, nd):
     xs = [x for x in xs if x is not None]
     return round(statistics.fmean(xs), nd) if xs else None
+
+
+_topo_cache: dict = {}
+
+
+@app.get("/api/topology")
+def topology_view(hours: float = 24):
+    """Repeater-to-repeater links seen in heard paths (cached for a minute)."""
+    hours = min(max(hours, 1), 24 * 30)
+    hit = _topo_cache.get(hours)
+    if hit and time.time() - hit[0] < 60:
+        return hit[1]
+    st = radio.state()
+    me = (st["lat"], st["lon"]) if st.get("lat") or st.get("lon") else None
+    since = now_ms() - int(hours * 3600_000)
+    out = topology.build(db.packets(since, limit=200_000), db.heard(now_ms() - 30 * 86400_000), me)
+    _topo_cache[hours] = (time.time(), out)
+    return out
+
+
+@app.get("/api/packets")
+async def packet_log(type: str | None = None, before: int | None = None, limit: int = 100):
+    """Stored frames, newest first, for the packet inspector list."""
+    rows = db.packet_log(type or None, before, min(max(limit, 1), 500))
+    for r in rows:
+        path, n = r.get("path") or "", r.get("path_len") or 0
+        size = len(path) // (2 * n) if n and r.get("ptype") != "TRACE" else 1
+        if r.get("ptype") == "TRACE":   # a trace's path holds SNRs, not hops
+            r["heard_from"] = ""
+        else:
+            r["heard_from"] = (radio.hop_name(path[-2 * size:]) or path[-2 * size:]) if path else "direct"
+    return rows
+
+
+@app.get("/api/packets/{pid}")
+async def packet_detail(pid: int):
+    p = db.packet(pid)
+    if not p:
+        raise HTTPException(404, "packet not found (older packets are pruned)")
+    d = radio.inspect_packet(p["raw"]) if p.get("raw") else {"fields": [], "summary": "raw bytes not kept for this packet"}
+    meta = {k: p[k] for k in ("id", "ts", "snr", "rssi", "route", "ptype", "path_len", "path", "size")}
+    return {**meta, **d}
 
 
 @app.get("/api/stats")

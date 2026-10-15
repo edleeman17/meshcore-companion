@@ -12,7 +12,7 @@ from collections import deque
 
 from meshcore import EventType, MeshCore
 
-from . import discover, filters, signing
+from . import discover, filters, inspect, signing
 from .db import DB, now_ms
 
 log = logging.getLogger("radio")
@@ -40,6 +40,12 @@ class Radio:
         self.contacts_ok = False
         self.clock_drift = None   # radio clock minus host clock at connect (s), before we fix it
         self.channels: dict[int, str] = {int(k): v for k, v in db.get_setting("channels", {}).items()}
+        self.chan_keys: dict[str, bytes] = {}   # name -> secret, in memory only (packet inspector)
+        # recent channel-post packet ids by (channel, sender time), so a signature
+        # packet can tag the post it signs (every copy heard via different repeaters)
+        self._recent_posts: dict[tuple, list[int]] = {}
+        self._signed_posts: dict[tuple, str] = {}
+        self._backfilled = False
         self.max_channels = MAX_CHANNELS
         self.device: dict = {}
         self.cli_waiters: dict[str, asyncio.Queue] = {}   # pubkey prefix -> CLI replies
@@ -198,6 +204,75 @@ class Radio:
             names = [h["name"] for h in self.db.heard_by_prefix(hop_hex) if h.get("type") == 2 and h.get("name")]
         return names[0] if len(names) == 1 else (f"{hop_hex}?" if not names else f"{names[0]}?")
 
+    def backfill_signed(self):
+        """Once per run: tag signature packets (and the posts they sign) already stored."""
+        if self._backfilled:
+            return
+        self._backfilled = True
+        n = 0
+        for row in self.db.raw_packets("GRP_DATA", now_ms() - 7 * 86400_000):
+            sig = self.inspect_packet(row["raw"]).get("signature")
+            if not sig:
+                continue
+            who, d_ids = sig.get("signer") or sig["keyid"], [row["id"]]
+            for t in self.db.raw_packets("GRP_TXT", row["ts"] - 600_000, row["ts"] + 600_000):
+                if self.inspect_packet(t["raw"]).get("sender_ts") == sig["ts"]:
+                    d_ids.append(t["id"])
+            self.db.mark_signed(d_ids, who)
+            n += 1
+        log.info("signed-packet backfill: %d signature packets tagged", n)
+
+    def _tag_signed(self, p: dict, pid: int) -> str | None:
+        """Tag signature packets and the channel posts they sign, for the Signed filter."""
+        if p.get("payload_type") == 5 and p.get("sender_timestamp") and p.get("chan_name"):
+            k = (p["chan_name"], p["sender_timestamp"])
+            if k in self._signed_posts:          # a copy of a post we already know is signed
+                self.db.mark_signed([pid], self._signed_posts[k])
+                return self._signed_posts[k]
+            self._recent_posts.setdefault(k, []).append(pid)
+            if len(self._recent_posts) > 300:
+                for old in list(self._recent_posts)[:100]:
+                    del self._recent_posts[old]
+        elif p.get("payload_type") == 6 and p.get("payload"):
+            try:
+                d = self.inspect_packet(p["payload"])
+            except Exception:  # noqa: BLE001 — never let the inspector break RX
+                return None
+            sig = d.get("signature")
+            if not sig:
+                return None
+            who = sig.get("signer") or sig["keyid"]
+            k = (d.get("channel"), sig["ts"])
+            self._signed_posts[k] = who
+            if len(self._signed_posts) > 300:
+                for old in list(self._signed_posts)[:100]:
+                    del self._signed_posts[old]
+            self.db.mark_signed([pid, *self._recent_posts.get(k, [])], who)
+            return who
+        return None
+
+    def inspect_packet(self, raw_hex: str) -> dict:
+        """Decode a stored frame, decrypting channel traffic with every key we know."""
+        keys = list(self.chan_keys.items())
+        keys.append(("Public", bytes.fromhex("8b3387e9c5cdea6ac9e5edbaa115cd72")))
+        for row in self.db.chan_seen_all():   # #hashtag channels found on air
+            if row.get("name"):
+                keys.append((row["name"], discover.key_for(row["name"])))
+        out = inspect.decode(raw_hex, keys, self.hop_name)
+        sig = out.get("signature")
+        if sig and self.mc:
+            me = (self.mc.self_info or {}).get("public_key") or ""
+            if me.startswith(sig["keyid"]):
+                sig["signer"] = "you"
+            else:
+                sig["signer"] = next((c.get("adv_name") for k, c in self.mc.contacts.items()
+                                      if k.startswith(sig["keyid"])), None)
+            if sig["signer"]:
+                out["summary"] += f" — signed by {sig['signer']}"
+                f = next(x for x in out["decrypted"] if x["name"] == "Key id")
+                f["note"] = f"{sig['signer']} · " + f["note"]
+        return out
+
     def path_names(self, path: str, size: int = 1) -> str:
         if not path:
             return ""
@@ -306,6 +381,7 @@ class Radio:
         if self._gone.is_set():
             raise RuntimeError("radio link dropped during setup")
         await self._set_connected(True)
+        asyncio.get_running_loop().run_in_executor(None, self.backfill_signed)   # off the event loop
         self.last_error = ""
         await mc.start_auto_message_fetching()
         await self.drain()   # the lib only fetches ONE queued message on start
@@ -363,6 +439,8 @@ class Radio:
             name = ev.payload.get("channel_name")
             if not name and idx >= 8 and idx > max(found or {0: 0}) + 4:
                 break          # 40 slots on this firmware; stop after a run of empties
+            if name and ev.payload.get("channel_secret"):
+                self.chan_keys[name] = ev.payload["channel_secret"]
             if name:
                 # trust the slot number in the reply, not the loop: a late reply to an
                 # earlier request otherwise shifts every name by one
@@ -559,7 +637,8 @@ class Radio:
             if len(self._rx_seen) > 500:
                 cutoff = now - 10
                 self._rx_seen = {k: t for k, t in self._rx_seen.items() if t > cutoff}
-        self.db.add_packet(p)
+        pid = self.db.add_packet(p)
+        signed = self._tag_signed(p, pid)
         size = p.get("path_hash_size") or 1
         path = p.get("path") or ""
         last_hop = path[-2 * size:] if path else ""
@@ -605,9 +684,13 @@ class Radio:
         if p.get("payload_type") == 5 and p.get("message") and self.echo_watch:
             await self._check_echo(p, last_hop)
         await self.hub.publish("packet", {
-            "ts": now_ms(), "snr": p.get("snr"), "rssi": p.get("rssi"),
+            "id": pid, "ts": now_ms(), "signed": signed, "snr": p.get("snr"), "rssi": p.get("rssi"),
             "route": p.get("route_typename"), "ptype": p.get("payload_typename"),
             "path_len": p.get("path_len"), "path": path, "hop": hop, "hop_rep": hop_rep,
+            # where it started, for the map's live trails: an advert's own key, or a
+            # readable channel post's sender name ("Name: text")
+            "adv_key": p.get("adv_key") if p.get("payload_type") == 4 else None,
+            "sender": (p.get("message") or "").split(": ", 1)[0] if ": " in (p.get("message") or "") else None,
             "heard_from": self.hop_name(last_hop) if last_hop else (hop_name or "direct"),
         })
 

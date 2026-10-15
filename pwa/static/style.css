@@ -478,7 +478,7 @@ a.btn { text-decoration: none; display: inline-flex; align-items: center; justif
 }
 @media (min-width: 80rem) { :root { --rail: 13rem; } }
 @media (min-width: 64rem) and (hover: hover) {
-  .list a:hover, .cta:hover { background: var(--surface); }
+  .list a:hover, .cta:hover, .menu a:hover { background: var(--surface); }
   .list a[aria-current]:hover { background: var(--surface-2); }
   .tabs a:hover { color: var(--fg); }
   .btn:not(.primary):not(.danger):hover { background: var(--surface-2); }
@@ -486,3 +486,44 @@ a.btn { text-decoration: none; display: inline-flex; align-items: center; justif
   .msg:hover { border-color: var(--line-strong); }
   .seg button:not(.on):hover { background: var(--surface-2); }
 }
+
+/* ---- packet inspector ---- */
+.pkt-tools { display: flex; flex-wrap: wrap; align-items: flex-end; gap: .5rem; margin-bottom: .6rem; }
+.pkt-tools .seg { margin-top: 0; overflow-x: auto; scrollbar-width: none; }
+.pkt-tools .seg button { white-space: nowrap; flex: none; }
+#live tr.pkt { cursor: pointer; }
+#live tr.pkt:hover td, #live tr.pkt:focus-visible td { background: var(--surface); }
+.hexdump { font: .82rem/1.7 var(--mono); background: var(--surface); border: 1px solid var(--line); padding: .5rem .6rem;
+  overflow-x: auto; white-space: nowrap; margin: .6rem 0 .3rem; }
+.hexdump .hb { cursor: pointer; padding: 0 1px; }
+.g-header { --g: var(--accent); } .g-path { --g: var(--link); } .g-payload { --g: var(--ok); } .g-plain { --g: var(--warn); }
+.hexdump .hb[class*="g-"]:not(.g-) { border-bottom: 2px solid var(--g); }
+.pk-key { display: flex; gap: .8rem; font-size: .8rem; color: var(--muted); margin: 0 0 .6rem; }
+.pk-key span { border-bottom: 2px solid var(--g); }
+.pk-fields td:first-child { white-space: nowrap; font-weight: 600; border-left: 3px solid var(--g, transparent); padding-left: .5rem; }
+.pk-fields td:first-child small { display: block; font-weight: 400; color: var(--muted); }
+.pk-fields code { font: .82rem var(--mono); word-break: break-all; }
+.pk-fields tr { cursor: pointer; }
+.hexdump .hl, .pk-fields tr.hl td { background: color-mix(in srgb, var(--g, var(--accent)) 22%, transparent); }
+
+/* ---- map: live packet trails ---- */
+.map-live { background: var(--bg); color: var(--fg); border: 1px solid var(--line-strong); padding: .45rem .6rem; font-size: .8rem; max-width: 16rem; }
+.map-live label { display: flex; gap: .4rem; align-items: center; font-weight: 600; }
+#trail-log div { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#trail-log div:first-child { color: var(--fg); }
+.trail-ping { animation: trail-ping 1.1s ease-out forwards; }
+@keyframes trail-ping { from { opacity: 1; } to { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .trail-ping { animation: none; } }
+
+/* ---- Signal / Radio: menu home + one page per feature ---- */
+.menu { display: flex; flex-direction: column; margin-top: 1rem; border-top: 1px solid var(--line); }
+.menu a { display: flex; gap: .85rem; align-items: center; padding: .8rem .2rem; min-height: var(--tap);
+  border-bottom: 1px solid var(--line); color: inherit; text-decoration: none; }
+.menu a > span:first-child { font-size: 1.3rem; width: 1.8rem; text-align: center; }
+.menu a > span:last-child { flex: 1; }
+.menu a::after { content: "›"; color: var(--faint); font-size: 1.4rem; }
+.menu b { display: block; }
+.menu small { display: block; color: var(--muted); font-size: .84rem; }
+.menu a:active { background: var(--surface-2); }
+.subpage > :first-child { margin-top: 1rem; }
+.range-slot .seg { margin-top: 0; margin-bottom: .6rem; }

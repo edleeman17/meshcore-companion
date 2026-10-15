@@ -94,7 +94,7 @@ function go() {
   const split = wide && (tab === "chats" || tab === "contacts");
   document.querySelectorAll(".view").forEach((v) => (v.hidden = true));
   document.querySelectorAll(".tabs a").forEach((a) => a.classList.toggle("on", a.dataset.tab === tab));
-  $("#back").hidden = !["dm", "chan", "contact", "placement"].includes(parts[0]) || split;
+  $("#back").hidden = !(["dm", "chan", "contact", "placement"].includes(parts[0]) || (["signal", "radio"].includes(parts[0]) && parts[1])) || split;
   $("#info").hidden = !["dm", "chan"].includes(parts[0]);
   $("#thread-info").hidden = true;
   document.body.classList.toggle("in-thread", ["dm", "chan"].includes(parts[0]));
@@ -119,10 +119,21 @@ function go() {
   else if (parts[0] === "placement") { $("#v-placement").hidden = false; $("#title").textContent = "Placement"; openPlacement(); }
   else if (tab === "contacts") { if (!split) { $("#v-contacts").hidden = false; $("#title").textContent = "Contacts"; loadContacts(); } }
   else if (tab === "map") { $("#v-map").hidden = false; $("#title").textContent = "Map"; showMap(); }
-  else if (tab === "signal") { $("#v-signal").hidden = false; $("#title").textContent = "Signal"; loadStats(); }
-  else if (tab === "radio") { $("#v-radio").hidden = false; $("#title").textContent = "Radio"; renderRadio(); fillSettings(); fillFilters(); loadStats(); renderBatteryList(); }
+  else if (tab === "signal") { showSub("signal", parts[1]); loadStats(); if (parts[1] === "packets") loadPackets(); }
+  else if (tab === "radio") { showSub("radio", parts[1]); renderRadio(); fillSettings(); fillFilters(); loadStats(); renderBatteryList(); }
   else if (!split) { $("#v-chats").hidden = false; $("#title").textContent = "MeshCore"; loadConvs(); }
 }
+// Signal and Radio open on a short menu; each feature is its own page (#/signal/charts).
+function showSub(view, sub) {
+  const sec = $(`#v-${view}`);
+  sec.hidden = false;
+  const page = sub && sec.querySelector(`.subpage[data-sub="${CSS.escape(sub)}"]`);
+  sec.querySelector(".sub-home").hidden = !!page;
+  sec.querySelectorAll(".subpage").forEach((d) => (d.hidden = d !== page));
+  $("#title").textContent = page ? page.dataset.title : view === "signal" ? "Signal" : "Radio";
+  page?.querySelector(".range-slot")?.append($("#range"));   // one range picker, shared
+}
+
 wideMq.addEventListener?.("change", () => {
   wide = wideMq.matches;
   document.body.classList.toggle("wide", wide);
@@ -148,7 +159,8 @@ async function refreshView() {
   } catch { /* offline: the banner says so */ }
 }
 window.addEventListener("hashchange", go);
-$("#back").onclick = () => (location.hash = { contact: "#/contacts", placement: "#/signal" }[S.route[0]] || "#/chats");
+$("#back").onclick = () => (location.hash = ["signal", "radio"].includes(S.route[0]) ? `#/${S.route[0]}`
+  : { contact: "#/contacts", placement: "#/signal" }[S.route[0]] || "#/chats");
 // Keyboard (desktop): Esc closes the open conversation/contact, "/" jumps to search.
 document.addEventListener("keydown", (e) => {
   if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || $("#sheet").open) return;
@@ -793,10 +805,87 @@ function onPacket(p) {
     PL.samples.push({ ts: p.ts, hop: p.hop, name: p.heard_from, snr: p.snr, rssi: p.rssi, rep: p.hop_rep !== false });
     if (S.route[0] === "placement") renderPlacementSoon();
   }
+  if (S.route[0] === "map" && TR.on) trailPacket(p);
+  if (PK.paused || (PK.type && (PK.type === "SIGNED" ? !p.signed : p.ptype !== PK.type))) return;
   const tb = $("#live tbody");
   tb.querySelector(".empty-row")?.remove();
-  tb.insertAdjacentHTML("afterbegin", `<tr><td>${hhmm(p.ts)}</td><td>${esc(p.ptype)}</td><td>${p.snr ?? ""}</td><td>${p.rssi ?? ""}</td><td>${esc(p.heard_from || "")}</td></tr>`);
+  tb.insertAdjacentHTML("afterbegin", pktRow(p));
   while (tb.rows.length > 30) tb.deleteRow(-1);
+}
+
+// ---------- packet inspector ----------
+// Every received frame is stored raw for a week; tap one in the live log to see
+// its bytes, what each byte means, and (for channels we hold the key to) the text.
+const PK = { paused: false, type: "" };
+const pktRow = (p) => `<tr class="pkt" data-id="${p.id ?? ""}" tabindex="0"><td>${hhmm(p.ts)}</td><td>${esc(p.ptype)}${p.signed ? ` <span title="signed by ${esc(p.signed)}">✍️</span>` : ""}</td><td>${p.snr ?? ""}</td><td>${p.rssi ?? ""}</td><td>${esc(p.heard_from || "")}</td></tr>`;
+
+async function loadPackets() {
+  let rows;
+  try { rows = await api(`/packets?limit=30${PK.type ? "&type=" + PK.type : ""}`); } catch { return; }
+  $("#live tbody").innerHTML = rows.length ? rows.map(pktRow).join("")
+    : `<tr class="empty-row"><td colspan="5" class="empty">${PK.type === "SIGNED" ? "No signed messages heard in the last week." : PK.type ? "None of these heard yet." : "Waiting for packets…"}</td></tr>`;
+}
+
+$("#pkt-type").onclick = (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  $("#pkt-type").querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
+  PK.type = b.dataset.t; loadPackets();
+};
+$("#pkt-pause").onclick = () => {
+  PK.paused = !PK.paused;
+  $("#pkt-pause").textContent = PK.paused ? "Resume" : "Pause";
+  $("#pkt-pause").setAttribute("aria-pressed", PK.paused);
+  if (!PK.paused) loadPackets();   // catch up on what arrived while paused
+};
+$("#live tbody").onclick = (e) => { const id = e.target.closest("tr.pkt")?.dataset.id; if (id) openPacket(id); };
+$("#live tbody").onkeydown = (e) => { if (e.key === "Enter") $("#live tbody").onclick(e); };
+
+function hexDump(hex, fields) {
+  const owner = [];
+  fields.forEach((f, i) => { for (let b = f.start; b < f.end; b++) owner[b] = i; });
+  let out = "";
+  for (let b = 0; b < hex.length / 2; b++) {
+    const i = owner[b], g = i == null ? "" : fields[i].group;
+    out += `<span class="hb g-${g}"${i == null ? "" : ` data-f="${i}"`}>${hex.substr(b * 2, 2)}</span>${b % 16 === 15 ? "<br>" : " "}`;
+  }
+  return out;
+}
+
+const fieldRows = (fields, pre) => fields.map((f, i) => `<tr class="pf g-${f.group}" data-f="${pre}${i}">
+  <td>${esc(f.name)}<small>${f.end - f.start} B</small></td><td><code>${esc(f.value.length > 48 ? f.value.slice(0, 48) + "…" : f.value)}</code>${f.note ? `<div class="hint">${esc(f.note)}</div>` : ""}</td></tr>`).join("");
+
+async function openPacket(id) {
+  let d;
+  try { d = await api(`/packets/${id}`); } catch (err) { return fail(err, "Couldn't load that packet"); }
+  const meta = [new Date(d.ts).toLocaleTimeString(), d.snr != null && `SNR ${d.snr} dB`, d.rssi != null && `RSSI ${d.rssi} dBm`, d.size != null && `${d.size} bytes`].filter(Boolean).join(" · ");
+  showSheet(`<h3 id="sheet-title" tabindex="-1" autofocus>${esc(d.summary)}</h3>
+    <p class="hint">${esc(meta)}</p>
+    ${d.type ? `<p class="hint">${esc(d.type)}: ${esc(d.type_note)} · ${esc(d.route_note)}</p>` : ""}
+    ${d.error ? `<p class="hint-line">Stopped decoding: ${esc(d.error)}</p>` : ""}
+    ${d.hex ? `<div class="hexdump" aria-label="Packet bytes">${hexDump(d.hex, d.fields)}</div>
+    <p class="pk-key"><span class="g-header">header</span> <span class="g-path">path</span> <span class="g-payload">payload</span></p>` : ""}
+    <table class="tbl pk-fields"><tbody>${fieldRows(d.fields, "")}</tbody></table>
+    ${d.decrypted ? `<h2 class="sub">Decrypted <small>${esc(d.channel)}</small></h2><table class="tbl pk-fields"><tbody>${fieldRows(d.decrypted, "p")}</tbody></table>` : ""}
+    <div class="actions">${d.path || d.pubkey ? `<button class="btn" id="pk-map">Show route on map</button>` : ""}${d.hex ? `<button class="btn" id="pk-copy">Copy hex</button>` : ""}</div>`);
+  const pm = $("#pk-map");
+  if (pm) pm.onclick = () => {
+    S.replay = { ...d, ptype: d.ptype, adv_key: d.pubkey, sender: d.text?.includes(": ") ? d.text.split(": ")[0] : null };
+    $("#sheet").close(); location.hash = "#/map";
+  };
+  const body = $("#sheet-body");
+  const light = (f) => {
+    body.querySelectorAll(".hl").forEach((x) => x.classList.remove("hl"));
+    if (f != null) body.querySelectorAll(`[data-f="${f}"]`).forEach((x) => x.classList.add("hl"));
+  };
+  body.querySelectorAll("[data-f]").forEach((x) => (x.onclick = () => {
+    light(x.classList.contains("hl") ? null : x.dataset.f);
+    if (x.classList.contains("hb")) body.querySelector(`tr[data-f="${x.dataset.f}"]`)?.scrollIntoView({ block: "nearest" });
+  }));
+  const cp = $("#pk-copy");
+  if (cp) cp.onclick = async () => {
+    try { await navigator.clipboard.writeText(d.hex); toast("Hex copied"); }
+    catch { cp.replaceWith(Object.assign(document.createElement("textarea"), { className: "sel-box", readOnly: true, rows: 4, value: d.hex })); }
+  };
 }
 
 // ---------- status + radio ----------
@@ -1721,7 +1810,7 @@ function renderSpots() {
 // ---------- map ----------
 // Plots your contacts plus every node heard advertising with a location
 // (repeaters live there now that auto-manage keeps them out of contacts).
-let map, layer, legend;
+let map, layer, legend, trails, links, mapNodes = [];
 async function showMap() {
   const my = nav;
   if (!map) {
@@ -1735,6 +1824,19 @@ async function showMap() {
       return d;
     };
     legend.addTo(map);
+    links = L.layerGroup().addTo(map);   // under the trails
+    trails = L.layerGroup().addTo(map);
+    const live = L.control({ position: "topright" });
+    live.onAdd = () => {
+      const d = L.DomUtil.create("div", "map-live");
+      d.innerHTML = `<label><input type="checkbox" id="trail-on" ${TR.on ? "checked" : ""}> Live packets</label>
+        <label><input type="checkbox" id="links-on" ${TR.links ? "checked" : ""}> Links heard (24 h)</label><div id="trail-log" aria-live="polite"></div>`;
+      L.DomEvent.disableClickPropagation(d);
+      d.querySelector("#links-on").onchange = (e) => { TR.links = e.target.checked; try { localStorage.links = TR.links ? "1" : "0"; } catch {} drawLinks(); };
+      d.querySelector("input").onchange = (e) => { TR.on = e.target.checked; try { localStorage.trails = TR.on ? "1" : "0"; } catch {} if (!TR.on) trails.clearLayers(); };
+      return d;
+    };
+    live.addTo(map);
   }
   setTimeout(() => map.invalidateSize(), 50);
   let heard = [];
@@ -1745,6 +1847,7 @@ async function showMap() {
   const nodes = new Map();
   for (const n of heard) if (n.lat || n.lon) nodes.set(n.pubkey, { key: n.pubkey, name: n.name || n.pubkey.slice(0, 8), type: n.type, lat: n.lat, lon: n.lon, snr: n.snr, last: n.last_ts, contact: n.is_contact });
   for (const c of S.contacts) if (c.lat || c.lon) nodes.set(c.public_key, { ...(nodes.get(c.public_key) || {}), key: c.public_key, name: c.name, type: c.type, lat: c.lat, lon: c.lon, contact: true });
+  mapNodes = [...nodes.values()];
   const pts = [];
   for (const n of nodes.values()) {
     pts.push([n.lat, n.lon]);
@@ -1760,6 +1863,101 @@ async function showMap() {
   if (S.focus) { map.setView([S.focus.lat, S.focus.lon], 13); S.focus = null; }
   else if (pts.length > 1) map.fitBounds(pts, { padding: [30, 30], maxZoom: 13 });
   else if (pts.length) map.setView(pts[0], 11);
+  drawLinks();
+  if (S.replay) { const p = S.replay; S.replay = null; setTimeout(() => trailPacket(p, true), 300); }
+}
+
+// ---------- live packet trails on the map ----------
+// Replays each packet's route: sender → repeaters → you. Hops are 1- or 2-byte key
+// prefixes, so we pick the located node with that prefix nearest the next point
+// back along the path (the last hop is near you), preferring repeaters.
+const TR = { on: (() => { try { return localStorage.trails !== "0"; } catch { return true; } })(), running: 0,
+  links: (() => { try { return localStorage.links === "1"; } catch { return false; } })() };
+const TRAIL_MS = 900;   // per leg
+
+const kmBetween = (a, b) => {
+  const r = Math.PI / 180, x = (b[1] - a[1]) * r * Math.cos(((a[0] + b[0]) / 2) * r), y = (b[0] - a[0]) * r;
+  return Math.hypot(x, y) * 6371;
+};
+
+// Repeater-to-repeater links from every path heard in the last day (bridge
+// /api/topology). Thicker = more packets; links to you are coloured by SNR.
+async function drawLinks() {
+  if (!links) return;
+  links.clearLayers();
+  if (!TR.links) return;
+  let t; try { t = await api("/topology?hours=24"); } catch { return toast("Couldn't load links", "err"); }
+  if (!TR.links) return;
+  const at = new Map(t.nodes.map((n) => [n.key, n]));
+  if (t.me) at.set("me", { ...t.me, name: "You" });
+  const r = L.canvas({ padding: .3 });
+  const grade = { "q-good": css("--ok"), "q-ok": css("--warn"), "q-bad": css("--accent") };
+  for (const e of t.edges) {
+    const a = at.get(e.a), b = at.get(e.b); if (!a || !b) continue;
+    const mine = e.a === "me" || e.b === "me";
+    L.polyline([[a.lat, a.lon], [b.lat, b.lon]], {
+      renderer: r, color: mine ? grade[qClass(e.snr)] || css("--fg") : css("--link"),
+      weight: Math.min(1 + Math.log2(e.count), 7), opacity: mine ? .9 : .45,
+    }).bindPopup(`<b>${esc(a.name)} ↔ ${esc(b.name)}</b><br>${e.count} packets relayed · last ${hhmm(e.last)}${e.snr != null ? `<br>you hear it at ${e.snr} dB` : ""}`)
+      .addTo(links);
+  }
+}
+
+function resolveTrail(p) {
+  const me = S.state?.lat ? [S.state.lat, S.state.lon] : null;
+  const n = p.path_len || 0, size = n ? Math.max(1, Math.round(p.path.length / 2 / n)) : 1;
+  const hops = p.ptype === "TRACE" ? [] : (p.path || "").match(new RegExp(`.{${2 * size}}`, "g")) || [];
+  const pts = [];
+  let next = me;
+  for (const h of hops.reverse()) {
+    const cands = mapNodes.filter((x) => x.key.startsWith(h));
+    const reps = cands.filter((x) => x.type === 2 || x.type === 3);
+    const pool = reps.length ? reps : cands;
+    let best = null, bestKm = Infinity;
+    for (const c of pool) { const km = next ? kmBetween(next, [c.lat, c.lon]) : 0; if (km < bestKm) { best = c; bestKm = km; } }
+    if (best && bestKm < 150) { pts.unshift({ ll: [best.lat, best.lon], name: best.name }); next = [best.lat, best.lon]; }
+    else pts.unshift(null);   // unknown or implausibly far: a gap in the trail
+  }
+  const origin = p.adv_key ? mapNodes.find((x) => x.key === p.adv_key)
+    : p.sender ? mapNodes.find((x) => x.name === p.sender) : null;
+  if (origin) pts.unshift({ ll: [origin.lat, origin.lon], name: origin.name, origin: true });
+  if (me) pts.push({ ll: me, name: "You" });
+  const known = pts.filter(Boolean);
+  return { known, gaps: pts.length - known.length, hops: hops.length };
+}
+
+function trailPacket(p, replay = false) {
+  if (!map || !trails || (!replay && TR.running >= 6)) return;
+  const { known, gaps, hops } = resolveTrail(p);
+  const log = $("#trail-log");
+  if (log) {
+    const via = p.heard_from && p.heard_from !== "direct" ? ` via ${p.heard_from}` : " direct";
+    log.insertAdjacentHTML("afterbegin", `<div>${hhmm(p.ts)} ${esc(p.ptype)}${esc(via)} · ${hops} hop${hops === 1 ? "" : "s"}${gaps ? ` (${gaps} not on map)` : ""}</div>`);
+    while (log.children.length > 4) log.lastChild.remove();
+  }
+  if (known.length < 2) { if (replay) toast("None of this packet's repeaters have a location on the map"); return; }
+  if (replay) map.fitBounds(known.map((k) => k.ll), { padding: [40, 40], maxZoom: 13 });
+  const colour = { GRP_TXT: css("--accent"), TEXT_MSG: css("--accent"), ADVERT: css("--link"), ACK: css("--ok") }[p.ptype] || css("--warn");
+  const line = L.polyline([known[0].ll], { color: colour, weight: 3, opacity: .85, className: "trail" }).addTo(trails);
+  const dot = L.circleMarker(known[0].ll, { radius: 5, color: colour, weight: 2, fillColor: colour, fillOpacity: 1 }).addTo(trails);
+  dot.bindTooltip(known.map((k) => k.name).join(" → "));
+  TR.running++;
+  let leg = 0, t0 = performance.now();
+  const step = (now) => {
+    const a = known[leg].ll, b = known[leg + 1].ll, f = Math.min(1, (now - t0) / TRAIL_MS);
+    const ll = [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
+    dot.setLatLng(ll);
+    const lls = line.getLatLngs(); lls[leg + 1] = L.latLng(ll); line.setLatLngs(lls);
+    if (f >= 1) {
+      L.circleMarker(b, { radius: 9, color: colour, weight: 2, fillOpacity: 0, className: "trail-ping" }).addTo(trails);
+      leg++; t0 = now;
+    }
+    if (leg < known.length - 1) return requestAnimationFrame(step);
+    TR.running--;
+    setTimeout(() => { trails.removeLayer(line); trails.removeLayer(dot); }, 4000);
+    setTimeout(() => trails.eachLayer((l) => l.options.className === "trail-ping" && trails.removeLayer(l)), 1200);
+  };
+  requestAnimationFrame(step);
 }
 
 // ---------- settings ----------

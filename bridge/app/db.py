@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 RETENTION_DAYS = 30
+RAW_DAYS = 7          # raw frames (packet inspector) are ~200 bytes each; keep a week
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -30,7 +31,9 @@ CREATE INDEX IF NOT EXISTS messages_peer ON messages(kind, peer, ts);
 CREATE TABLE IF NOT EXISTS packets (
   ts INTEGER NOT NULL,
   snr REAL, rssi INTEGER,
-  route TEXT, ptype TEXT, path_len INTEGER, path TEXT, size INTEGER
+  route TEXT, ptype TEXT, path_len INTEGER, path TEXT, size INTEGER,
+  raw TEXT,                        -- the whole frame as hex, for the packet inspector
+  signed TEXT                      -- signer (name or key id) for signature packets and the posts they sign
 );
 CREATE INDEX IF NOT EXISTS packets_ts ON packets(ts);
 
@@ -99,6 +102,10 @@ class DB:
         # Backfill unknowns to 1-byte: all traffic observed to date is 1-byte. A node's
         # next advert bumps it to 2 via the MAX() in upsert_heard if it has upgraded.
         self.conn.execute("UPDATE heard SET hash_size=1 WHERE hash_size IS NULL")
+        pcols = {r[1] for r in self.conn.execute("PRAGMA table_info(packets)")}
+        for col in ("raw", "signed"):
+            if col not in pcols:
+                self.conn.execute(f"ALTER TABLE packets ADD COLUMN {col} TEXT")
         self.lock = threading.Lock()
 
     def _exec(self, sql, args=()):
@@ -280,14 +287,41 @@ class DB:
         return self._rows("SELECT * FROM heard WHERE last_ts>=? ORDER BY last_ts DESC", (since_ms,))
 
     # RF + samples
-    def add_packet(self, p: dict):
-        self._exec("INSERT INTO packets VALUES (?,?,?,?,?,?,?,?)",
-                   (now_ms(), p.get("snr"), p.get("rssi"), p.get("route_typename"),
-                    p.get("payload_typename"), p.get("path_len"), p.get("path"),
-                    p.get("payload_length")))
+    def add_packet(self, p: dict) -> int:
+        cur = self._exec("INSERT INTO packets (ts, snr, rssi, route, ptype, path_len, path, size, raw) "
+                         "VALUES (?,?,?,?,?,?,?,?,?)",
+                         (now_ms(), p.get("snr"), p.get("rssi"), p.get("route_typename"),
+                          p.get("payload_typename"), p.get("path_len"), p.get("path"),
+                          p.get("payload_length"), p.get("payload")))
+        return cur.lastrowid
+
+    def raw_packets(self, ptype: str, since_ms: int, until_ms: int | None = None) -> list[dict]:
+        return self._rows("SELECT rowid AS id, ts, raw FROM packets WHERE ptype=? AND raw IS NOT NULL "
+                          "AND ts>=? AND ts<=?", (ptype, since_ms, until_ms or now_ms()))
+
+    def mark_signed(self, ids: list[int], who: str):
+        for i in ids:
+            self._exec("UPDATE packets SET signed=? WHERE rowid=?", (who, i))
+
+    def packet(self, pid: int) -> dict | None:
+        rows = self._rows("SELECT rowid AS id, * FROM packets WHERE rowid=?", (pid,))
+        return rows[0] if rows else None
+
+    def packet_log(self, ptype: str | None = None, before: int | None = None, limit=100) -> list[dict]:
+        """Newest stored frames for the inspector list (raw left out: fetched per packet)."""
+        sql, args = ("SELECT rowid AS id, ts, snr, rssi, route, ptype, path_len, path, size, "
+                     "signed, raw IS NOT NULL AS has_raw FROM packets WHERE 1"), []
+        if ptype == "SIGNED":
+            sql += " AND signed IS NOT NULL"
+        elif ptype:
+            sql += " AND ptype=?"; args.append(ptype)
+        if before:
+            sql += " AND rowid<?"; args.append(before)
+        return self._rows(sql + " ORDER BY rowid DESC LIMIT ?", (*args, limit))
 
     def packets(self, since_ms: int, limit=5000) -> list[dict]:
-        return self._rows("SELECT * FROM packets WHERE ts>=? ORDER BY ts DESC LIMIT ?",
+        return self._rows("SELECT ts, snr, rssi, route, ptype, path_len, path, size FROM packets "
+                          "WHERE ts>=? ORDER BY ts DESC LIMIT ?",
                           (since_ms, limit))
 
     def add_sample(self, data: dict):
@@ -300,6 +334,8 @@ class DB:
     def prune(self):
         cutoff = now_ms() - RETENTION_DAYS * 86400_000
         self._exec("DELETE FROM packets WHERE ts<?", (cutoff,))
+        self._exec("UPDATE packets SET raw=NULL WHERE raw IS NOT NULL AND ts<?",
+                   (now_ms() - RAW_DAYS * 86400_000,))
         self._exec("DELETE FROM samples WHERE ts<?", (cutoff,))
 
     # push + settings
