@@ -484,6 +484,11 @@ function msgDetails(m) {
   const canTrust = !canPinKey && m.direction === "in" && m.kind === "chan" && m.sender
     && (m.path || m.path_len === 0) && !m.verified;
   const canMap = m.direction === "in" && ((m.path && m.path.length) || m.path_len === 0);
+  // DM the sender of a channel post, if their name matches a person/room you have
+  // as a contact (so we hold their key). Prefer a key-verified signer.
+  const dmTo = m.kind === "chan" && m.direction === "in" && m.sender
+    ? S.contacts.find((c) => (c.type === 1 || c.type === 3) && c.name === m.sender)
+    : null;
   // Fixed path: reverse this inbound DM's hop order to get a candidate route back.
   const canPin = m.kind === "dm" && m.direction === "in" && m.path && m.path.length >= 2;
   const revPath = canPin ? (m.path.match(/../g) || []).reverse().join("") : "";
@@ -491,6 +496,8 @@ function msgDetails(m) {
     .map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join("");
   showSheet(`<h3 id="sheet-title" tabindex="-1" autofocus>Message details</h3>${journeyHtml(m)}
     <dl class="kv">${kv(summary)}</dl>
+    ${dmTo ? `<div class="actions"><button type="button" class="btn primary" id="dm-btn">💬 Message ${esc(dmTo.name)} privately</button></div>` : ""}
+    ${m.kind === "chan" && m.direction === "in" && m.sender && !dmTo ? `<p class="hint">To DM ${esc(m.sender)}, add them as a contact first (Contacts → Nearby, or scan their QR) — a channel name alone isn't enough to reach them.</p>` : ""}
     ${m.direction === "in" && callsignOf(summary.From) ? `<div class="actions"><button type="button" class="btn" data-call="${callsignOf(summary.From)}">📻 ${callsignOf(summary.From)} — ham profile</button></div>` : ""}
     ${canMap ? `<div class="actions"><button type="button" class="btn" id="routemap-btn">🗺 Show route on map</button></div>` : ""}
     ${canPin ? `<div class="actions"><button type="button" class="btn" id="pin-btn">🧭 Pin this route (${revPath.length / 2} hops)</button>
@@ -504,6 +511,7 @@ function msgDetails(m) {
       <button type="button" class="btn" id="untrust-btn">Forget confirmed route</button></div>
       <p class="hint">Channel names can be faked. Confirming remembers where the real ${esc(m.sender)} sends from, and flags their name arriving from anywhere else.</p>` : ""}
     <details class="fold"><summary>Technical details</summary><dl class="kv">${kv(rows)}</dl></details>`);
+  $("#dm-btn")?.addEventListener("click", () => { $("#sheet").close(); location.hash = `#/dm/${dmTo.prefix}`; });
   $("#routemap-btn")?.addEventListener("click", () => routeMap(m).catch((err) => fail(err, "Couldn't map the route")));
   const sheetAct = (id, fn, ok, what) => $(id)?.addEventListener("click", async () => {
     try { await fn(); $("#sheet").close(); if (ok) toast(ok); } catch (err) { fail(err, what); }
