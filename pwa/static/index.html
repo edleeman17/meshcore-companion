@@ -11,8 +11,12 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="MeshCore">
 <script>
-  // Apply a saved Light/Dark choice before first paint (System = no attribute).
-  try { const t = localStorage.getItem("theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch {}
+  // Apply a saved Light/Dark choice and colour theme before first paint (System / default = no attribute).
+  try {
+    const t = localStorage.getItem("theme"), p = localStorage.getItem("palette");
+    if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+    if (p) document.documentElement.dataset.palette = p;
+  } catch {}
 </script>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
@@ -88,8 +92,11 @@
       <button id="my-qr" class="btn">My QR code</button>
     </div>
     <h2 class="sub">Your contacts <small id="contact-count"></small></h2>
-    <div class="seg" id="ctype" role="tablist">
-      <button data-t="" class="on">All</button><button data-t="1">People</button><button data-t="2">Repeaters</button><button data-t="3">Rooms</button>
+    <div class="contact-tools">
+      <input id="contact-search" class="search" type="search" placeholder="Search contacts" autocomplete="off" aria-label="Search contacts">
+      <div class="seg" id="ctype" role="tablist">
+        <button data-t="" class="on">All</button><button data-t="fav" aria-label="Favourites" title="Favourites">★</button><button data-t="1">People</button><button data-t="2">Repeaters</button><button data-t="3">Rooms</button>
+      </div>
     </div>
     <div id="contact-list" class="list"></div>
     <h2 class="sub">Nearby now <small id="nearby-note"></small></h2>
@@ -230,7 +237,7 @@
         <a href="#/radio/notify"><span aria-hidden="true">🔔</span><span><b>Notifications</b><small>Channels, offline and back-in-range alerts</small></span></a>
         <a href="#/radio/batteries"><span aria-hidden="true">🪫</span><span><b>Repeater batteries</b><small>Watched repeaters, checked every 3 hours</small></span></a>
         <a href="#/radio/filters"><span aria-hidden="true">🚫</span><span><b>Spam filters</b><small>Hide senders, text and bot floods</small></span></a>
-        <a href="#/radio/appearance"><span aria-hidden="true">🎨</span><span><b>Appearance</b><small>Light, dark or system</small></span></a>
+        <a href="#/radio/appearance"><span aria-hidden="true">🎨</span><span><b>Appearance</b><small>Colour theme, light or dark</small></span></a>
         <a href="#/radio/maintenance"><span aria-hidden="true">🛠️</span><span><b>Maintenance</b><small>Adverts and reboot</small></span></a>
       </nav>
     </div>
@@ -278,8 +285,7 @@
       <h2 class="sub">Contacts</h2>
       <label class="check"><input name="manual_add_contacts" type="checkbox"> Only add contacts manually</label>
       <label class="check"><input name="auto_manage" type="checkbox"> Auto-manage contacts</label>
-      <small class="hint">Adds people and rooms you hear, never keeps repeaters, and rotates out the oldest non-favourite person when full. Favourites (★) are never removed.</small>
-      <label>Keep at most this many people <input name="people_cap" type="number" min="10" max="300" placeholder="200"></label>
+      <small class="hint">Adds people and rooms you hear. Only when the radio's contact list is nearly full does it remove the least recently heard contacts, to make room. Favourites (★) are never removed.</small>
 
       <h2 class="sub">Advanced</h2>
       <div class="two">
@@ -320,9 +326,12 @@
     </form>
     </div>
     <div class="subpage" data-sub="appearance" data-title="Appearance" hidden>
+    <h2 class="sub">Mode</h2>
     <div class="seg" id="theme">
       <button data-theme="system" class="on">System</button><button data-theme="light">Light</button><button data-theme="dark">Dark</button>
     </div>
+    <h2 class="sub">Colour theme</h2>
+    <div class="palettes" id="palettes"></div>
     </div>
     <div class="subpage" data-sub="maintenance" data-title="Maintenance" hidden>
     <div class="row-actions">

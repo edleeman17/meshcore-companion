@@ -186,11 +186,16 @@ class DB:
     def conversations(self) -> list[dict]:
         rows = self._rows("""
             SELECT kind, peer, MAX(ts) AS last_ts, COUNT(*) AS count,
-                   (SELECT text FROM messages m2 WHERE m2.kind=m.kind AND m2.peer=m.peer
-                    AND COALESCE(m2.hidden,0)=0 ORDER BY ts DESC LIMIT 1) AS last_text
+                   (SELECT id FROM messages m2 WHERE m2.kind=m.kind AND m2.peer=m.peer
+                    AND COALESCE(m2.hidden,0)=0 ORDER BY ts DESC LIMIT 1) AS last_id
             FROM messages m WHERE COALESCE(hidden,0)=0 GROUP BY kind, peer ORDER BY last_ts DESC""")
+        last = {r["id"]: r for r in self._rows(
+            f"SELECT id, text, direction, sender FROM messages WHERE id IN ({','.join('?' * len(rows))})",
+            [r["last_id"] for r in rows])} if rows else {}
         read = self.get_setting("read", {})
         for r in rows:
+            m = last.get(r.pop("last_id"), {})
+            r["last_text"], r["last_dir"], r["last_sender"] = m.get("text"), m.get("direction"), m.get("sender")
             since = read.get(f"{r['kind']}:{r['peer']}", 0)
             r["unread"], r["mentions"] = self._rows(
                 "SELECT COUNT(*) AS n, COALESCE(SUM(mention),0) AS m FROM messages "

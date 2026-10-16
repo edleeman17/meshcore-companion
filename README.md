@@ -32,7 +32,13 @@ A self-hosted web app for your [MeshCore](https://meshcore.io) LoRa radio. A sma
 
 ## Features
 
+**New: 👍 Reactions and swipe to reply** — hold a message (or right-click it) to react with 👍 ❤️ 😂 😮 😢 🙏, reply, copy or open its details; swipe a message right to reply. MeshCore has no reaction packet, so a reaction goes out as an ordinary short message any client can read (`@[Alice] 👍` in a channel, `👍` in a DM, with a short `"quote…"` added when it's for an older message) and this app folds it under the message it's for. Replying in a channel starts your post with `@[Name] ` so they get a mention; the "replying to" quote stays on your screen and costs no bytes.
+
+**New: 🎨 Colour themes and contact colours** — Radio → Appearance: Kanagawa, Nord, Gruvbox, Solarized or High contrast, each in light and dark. Every contact gets its own colour from their name, so busy channels are easy to follow. The chat list shows who spoke last (**You:** or the channel sender), Contacts has search and a ★ favourites filter, and the whole app has quick, small animations (off with the system's reduce-motion setting).
+
 **New: ⚙️ Every radio setting** — Radio → Settings now covers everything the companion firmware exposes: name and BLE PIN; location, whether adverts share it, and **GPS on/off** (shown when the radio detects a GPS module at power-on); TX power and the LoRa preset (frequency, bandwidth, SF, CR — locked behind a checkbox, with the UK/EU Narrow preset); who may read your battery, location and sensor telemetry; contact handling; 1- or 2-byte path hashes, the on-screen clock's timezone, airtime factor, RX delay and extra delivery receipts. Only changed values are written, and LoRa values are validated as a set.
+
+**New: 🔎 Packet inspector** — Signal → Live packets: tap any packet to see its raw bytes as a colour-coded hex dump, with every field named and explained (header, route, each hop by repeater name, advert key/location/name, ACKs, trace SNRs). Channel traffic is **decrypted** with every key the app knows (your channels, Public, discovered `#hashtags`), and signature packets are split into key id, signed time and signature. Filter by type, pause the log, copy the hex, or **Show route on map**. Raw packets are kept for 7 days.
 
 **📶 WiFi radio link** — companion firmware v1.18's normal BLE build also speaks WiFi. Set `RADIO_HOST` and the bridge connects over your network instead of Bluetooth (no more BLE drop-outs), while your phone can still use Bluetooth. Set the radio's WiFi from the bridge with `POST /api/radio/cli` (`set wifi.ssid …`, `set wifi.pwd …`, `reboot`), which runs any companion CLI command on your own radio.
 
@@ -74,7 +80,7 @@ A self-hosted web app for your [MeshCore](https://meshcore.io) LoRa radio. A sma
 - Add and remove channels (paste a `meshcore://channel/add` link straight in). Private channels show their key so you can share it.
 - **Callsign profiles:** UK amateur callsigns in node names (`M0ABC Repeater`, `Phil(M1ABC)`) get a 📻 chip. Tap it for licence class, region and **"Ham since"** (from when that callsign series was issued, e.g. M5 → 1999–2001), plus a link to their QRZ.com page. Add a QRZ login to the bridge to see names and towns too.
 - **QR codes:** show yours (or any contact's) for someone to scan, and scan theirs with the camera. Contact and channel links both work.
-- **Self-managing contacts:** people and rooms you hear are added automatically, repeaters are never kept, and the oldest non-favourite person rotates out when the table is full. ★ **Favourites** are never removed.
+- **Self-managing contacts:** people and rooms you hear are added automatically. Only when the radio's contact table is nearly full do the least recently heard contacts rotate out to make room; nothing is removed just for being a repeater. ★ **Favourites** are never removed.
 - **Route control** per contact: pin a fixed route through a heard repeater, or go back to flood. DMs that arrived on a saved route say so.
 - **1-byte / 2-byte path-hash badge** on every node, from its adverts — spot who's on 2-byte MeshCore.
 
@@ -99,7 +105,7 @@ A self-hosted web app for your [MeshCore](https://meshcore.io) LoRa radio. A sma
 - Radio clock synced on every connect.
 
 **App**
-- Installable PWA, phone-first, sharp minimal design. **Light, dark or follow the system.**
+- Installable PWA, phone-first, sharp minimal design. **Five colour themes, light, dark or follow the system.**
 - In-app confirmations and toasts (no browser pop-ups, which iOS home-screen apps can block).
 - Keeps your place when you switch apps; live updates never jump the scroll.
 

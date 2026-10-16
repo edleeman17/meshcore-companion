@@ -20,7 +20,7 @@ log = logging.getLogger("radio")
 POLL_SECS = 60
 CONTACTS_SECS = 300
 MAX_CHANNELS = 8
-PEOPLE_CAP = 200          # keep at most this many non-favourite people; rotate oldest out
+HEADROOM = 8              # free contact slots to keep on the radio so new adverts still land
 AUTO_ADD_PER_CYCLE = 6    # cap work per poll so we never block the BLE link for long
 AUTO_REMOVE_PER_CYCLE = 12
 WIFI_PER_CYCLE = 50       # TCP has bandwidth to spare: no need to ration
@@ -89,7 +89,6 @@ class Radio:
             "manual_add_contacts": si.get("manual_add_contacts"),
             "max_tx_power": si.get("max_tx_power"),
             "auto_manage": self.db.get_setting("auto_manage", True),
-            "people_cap": self.db.get_setting("people_cap", PEOPLE_CAP),
             "notify_back": self.db.get_setting("notify_back", True),
             "notify_offline": self.db.get_setting("notify_offline", True),
             "pending": len(self.mc.pending_contacts) if self.mc else 0,
@@ -533,11 +532,11 @@ class Radio:
             await asyncio.sleep(POLL_SECS)
 
     async def _auto_manage_contacts(self):
-        """Keep the radio's contact table self-managing:
-          - repeaters/sensors are never saved (purged, except any favourited);
+        """Keep the radio's contact table from filling up:
           - people + rooms heard over the air are auto-added so we keep their keys;
-          - when non-favourite people exceed the cap, the oldest rotate out;
-          - favourites are never removed.
+          - only when the table is nearly full (the radio's own max_contacts), the
+            least recently active non-favourites rotate out to leave some headroom;
+          - favourites are never removed, and nothing is removed just for its type.
         Work is capped per cycle so a busy mesh never hogs the BLE link."""
         if not self.mc or not self.db.get_setting("auto_manage", True):
             return
@@ -556,39 +555,27 @@ class Radio:
                 except Exception as e:  # noqa: BLE001
                     log.debug("auto-add %s failed: %s", pk[:8], e)
 
-        # 2. purge repeaters/sensors that slipped into the table
-        for pk, c in list(self.mc.contacts.items()):
-            if removed >= (WIFI_PER_CYCLE if self.host else AUTO_REMOVE_PER_CYCLE):
-                break
-            if c.get("type") in (2, 4) and pk not in favs:
-                try:
-                    await self.command("remove_contact", pk)
-                except RuntimeError:          # already gone
-                    pass
-                self.mc.contacts.pop(pk, None)
-                removed += 1
-
-        # 3. rotate oldest non-favourite people when over the cap
-        cap = int(self.db.get_setting("people_cap", PEOPLE_CAP) or PEOPLE_CAP)
-        people = [c for c in self.mc.contacts.values()
-                  if c.get("type") == 1 and c["public_key"] not in favs]
-        if len(people) > cap:
-            recency = self.db.last_dm_ts()
-            people.sort(key=lambda c: max(recency.get(c["public_key"][:12], 0),
-                                          (c.get("last_advert") or 0) * 1000))
-            for c in people[:len(people) - cap]:
-                if removed >= (WIFI_PER_CYCLE if self.host else AUTO_REMOVE_PER_CYCLE):
-                    break
-                try:
-                    await self.command("remove_contact", c["public_key"])
-                except RuntimeError:
-                    pass
-                self.mc.contacts.pop(c["public_key"], None)
-                removed += 1
+        # 2. rotate out the least recently active non-favourites, only when nearly full
+        max_contacts = int(self.device.get("max_contacts") or 0)
+        if max_contacts:
+            keep = max(1, max_contacts - max(HEADROOM, max_contacts // 25))
+            over = len(self.mc.contacts) - keep
+            if over > 0:
+                recency = self.db.last_dm_ts()
+                spare = sorted((c for c in self.mc.contacts.values() if c["public_key"] not in favs),
+                               key=lambda c: max(recency.get(c["public_key"][:12], 0),
+                                                 (c.get("last_advert") or 0) * 1000))
+                for c in spare[:min(over, WIFI_PER_CYCLE if self.host else AUTO_REMOVE_PER_CYCLE)]:
+                    try:
+                        await self.command("remove_contact", c["public_key"])
+                    except RuntimeError:          # already gone
+                        pass
+                    self.mc.contacts.pop(c["public_key"], None)
+                    removed += 1
 
         if added or removed:
             await self.refresh_contacts()
-            log.info("auto-manage: +%d people/rooms, -%d repeater/stale", added, removed)
+            log.info("auto-manage: +%d people/rooms, -%d least recently active", added, removed)
 
     # ---------- inbound ----------
     async def _on_dm(self, e):
