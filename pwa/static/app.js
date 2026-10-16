@@ -61,7 +61,8 @@ let toastTimer;
 function toast(msg, kind = "") {
   const t = $("#toast");
   t.textContent = msg; t.className = "toast " + kind; t.hidden = false;
-  clearTimeout(toastTimer); toastTimer = setTimeout(() => (t.hidden = true), kind === "err" ? 5000 : 3000);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.classList.add("leaving"); toastTimer = setTimeout(() => (t.hidden = true), 180); }, kind === "err" ? 5000 : 3000);
 }
 const fail = (err, what = "") => toast(`${what}${what ? ": " : ""}${err?.message || err}`, "err");
 
@@ -92,16 +93,116 @@ let wide = wideMq.matches;
 document.body.classList.toggle("wide", wide);
 const isSplit = () => document.body.classList.contains("split");
 
-let settleTimer;
+// ---------- motion ----------
+// Screens slide in the way you're heading: deeper pages from the right, back
+// from the left, tabs from the side of the tab you picked. Only the incoming
+// screen moves, so it never waits on the outgoing one. Off for reduced motion.
+const calmMq = matchMedia("(prefers-reduced-motion: reduce)");
+const TAB_ORDER = ["chats", "contacts", "map", "signal", "radio"];
+const tabOf = (p) => ["dm", "chan"].includes(p[0]) ? "chats" : p[0] === "contact" ? "contacts" : p[0] === "placement" ? "signal" : p[0];
+const depthOf = (p) => ["dm", "chan", "contact", "placement"].includes(p[0]) || (["signal", "radio"].includes(p[0]) && p[1]) ? 1 : 0;
+const MOVES = {
+  push: { x: 32, ms: 240 }, pop: { x: -32, ms: 240 },
+  next: { x: 16, ms: 200 }, prev: { x: -16, ms: 200 }, swap: { x: 0, ms: 160 },
+};
+function motion(el, x, ms, extra = {}) {
+  if (calmMq.matches || !el?.animate) return;
+  el.animate([{ opacity: 0, transform: `translateX(${x}px)`, ...extra }, { opacity: 1, transform: "none" }],
+    { duration: ms, easing: "cubic-bezier(.2, .8, .2, 1)" });
+}
+const shownPanes = () => new Set([...document.querySelectorAll(".view, .subpage, .sub-home")].filter((v) => !v.hidden && !v.closest("[hidden]")));
+const routeParts = () => (location.hash.replace(/^#\/?/, "") || "chats").split("/").map(decodeURIComponent);
+function navKind(from, to) {
+  const fd = depthOf(from), td = depthOf(to), ft = TAB_ORDER.indexOf(tabOf(from)), tt = TAB_ORDER.indexOf(tabOf(to));
+  return td > fd ? "push" : td < fd ? "pop" : ft !== tt ? (tt > ft ? "next" : "prev") : "swap";
+}
+// On phones, where the browser can (Safari 18+, Chrome 111+), both screens move
+// like a native stack: the old one slides away as the new one comes over it.
+// The page is snapshotted, so the browser does the work off the main thread.
+let inVT = false, navWait = null, lastSlide = -1e9;
+const canVT = () => !!document.startViewTransition && !wide && !calmMq.matches;
+function navigate() {
+  const from = S.route, to = routeParts();
+  if (!canVT() || !nav || from.join("/") === to.join("/")) return go();
+  const root = document.documentElement;
+  root.dataset.nav = navKind(from, to);
+  inVT = true; lastSlide = performance.now();
+  const vt = document.startViewTransition(async () => {
+    go();
+    // A conversation not in memory yet: give it a moment so the slide shows
+    // messages rather than "Loading…" (the prefetch on touch usually has them).
+    const w = navWait; navWait = null;
+    if (w) await Promise.race([w, new Promise((r) => setTimeout(r, 120))]);
+  });
+  vt.ready.catch(() => {});   // skipped when another tap starts a new one
+  vt.finished.finally(() => { inVT = false; delete root.dataset.nav; });
+}
+function animateNav(from, to, before) {
+  if (!from) return;
+  const fd = depthOf(from), td = depthOf(to), ft = TAB_ORDER.indexOf(tabOf(from)), tt = TAB_ORDER.indexOf(tabOf(to));
+  const kind = navKind(from, to);
+  const { x, ms } = MOVES[kind];
+  if (inVT) {   // the page itself is moving in the transition; the live header just follows
+    motion($("#title"), Math.sign(x) * 10, ms);
+    if (fd === 0 && td === 1 && !$("#back").hidden) motion($("#back"), -8, ms + 60);
+    moveTabMark(ft !== tt); return;
+  }
+  const now = shownPanes();
+  // Animate only the outermost pane that just appeared (a subpage inside a newly
+  // shown section moves with it).
+  let entering = [...now].filter((v) => !before.has(v) && ![...now].some((o) => o !== v && !before.has(o) && o.contains(v)));
+  // Same screen, new contents (one conversation to another): fade the contents.
+  if (!entering.length && from.join("/") !== to.join("/")) entering = [...now].filter((v) => v.matches(".view")).slice(-1);
+  for (const v of entering) {
+    // The conversation holds the fixed composer, which a transform would drag
+    // along, so its messages move instead.
+    if (v.id === "v-thread") { motion($("#msgs"), x, ms); motion($("#thread-info"), x, ms); }
+    else if (v.id === "v-map") motion(v, 0, ms);
+    else motion(v, x, ms);
+  }
+  if (kind !== "swap" || entering.length) motion($("#title"), Math.sign(x) * 10, ms);
+  if (fd === 0 && td === 1 && !$("#back").hidden) motion($("#back"), -8, ms + 60);
+  moveTabMark(ft !== tt);
+}
+// The active-tab marker slides between tabs instead of jumping.
+const tabMark = document.createElement("span");
+tabMark.className = "tab-mark"; tabMark.setAttribute("aria-hidden", "true");
+$(".tabs").append(tabMark);
+function moveTabMark(bump) {
+  const a = $(".tabs a.on"); if (!a) { tabMark.hidden = true; return; }
+  tabMark.hidden = false;
+  if (!a.offsetWidth) return;   // tabs hidden (in a conversation on a phone): keep its place
+  const vertical = wide;
+  Object.assign(tabMark.style, vertical
+    ? { transform: `translateY(${a.offsetTop}px)`, height: a.offsetHeight + "px", width: "" }
+    : { transform: `translateX(${a.offsetLeft}px)`, width: a.offsetWidth + "px", height: "" });
+  if (bump && !calmMq.matches) {
+    a.querySelector("svg")?.animate([{ transform: "scale(.8)" }, { transform: "translateY(-2px) scale(1.25)" }, { transform: "translateY(-1px) scale(1.12)" }],
+      { duration: 320, easing: "ease-out" });
+    navigator.vibrate?.(4);
+  }
+}
+window.addEventListener("resize", () => moveTabMark(false));
+requestAnimationFrame(() => requestAnimationFrame(() => tabMark.classList.add("ready")));   // no slide in from 0 on first paint
+
+// A list's rows stagger in the first time it fills, then never again: replaying
+// it on every visit (and again when fresh data re-renders the rows a moment
+// later) is what made screens flicker. The screen's slide is the entrance now.
+const settleObs = new MutationObserver((muts) => {
+  for (const { target: l } of muts) {
+    if (l.classList.contains("settled") || l.settling || !l.children.length) continue;
+    // Filled by a screen that slid in: Safari may have snapshotted it mid-fade.
+    if (performance.now() - lastSlide < 800) { l.classList.add("settled"); continue; }
+    l.settling = setTimeout(() => l.classList.add("settled"), 600);
+  }
+});
+document.querySelectorAll(".list").forEach((l) => settleObs.observe(l, { childList: true }));
 function go() {
+  const from = nav ? S.route : null, before = shownPanes();
   nav++;
   $("#sheet").open && $("#sheet").close();
   closeMsgMenu();
-  // Lists animate in once per visit, not on every live refresh.
-  document.querySelectorAll(".list.settled").forEach((l) => l.classList.remove("settled"));
-  clearTimeout(settleTimer);
-  settleTimer = setTimeout(() => document.querySelectorAll(".list").forEach((l) => l.classList.add("settled")), 900);
-  const parts = (location.hash.replace(/^#\/?/, "") || "chats").split("/").map(decodeURIComponent);
+  const parts = routeParts();
   S.route = parts;
   const tab = ["dm", "chan"].includes(parts[0]) ? "chats" : parts[0] === "contact" ? "contacts"
     : parts[0] === "placement" ? "signal" : parts[0];
@@ -136,6 +237,7 @@ function go() {
   else if (tab === "signal") { showSub("signal", parts[1]); loadStats(); if (parts[1] === "packets") loadPackets(); }
   else if (tab === "radio") { showSub("radio", parts[1]); renderRadio(); fillSettings(); fillFilters(); loadStats(); renderBatteryList(); }
   else if (!split) { $("#v-chats").hidden = false; $("#title").textContent = "MeshCore"; loadConvs(); }
+  animateNav(from, parts, before);
 }
 // Signal and Radio open on a short menu; each feature is its own page (#/signal/charts).
 function showSub(view, sub) {
@@ -172,7 +274,7 @@ async function refreshView() {
     else if (view !== "contact") loadConvs();
   } catch { /* offline: the banner says so */ }
 }
-window.addEventListener("hashchange", go);
+window.addEventListener("hashchange", navigate);
 $("#back").onclick = () => (location.hash = ["signal", "radio"].includes(S.route[0]) ? `#/${S.route[0]}`
   : { contact: "#/contacts", placement: "#/signal" }[S.route[0]] || "#/chats");
 // Keyboard (desktop): Esc closes the open conversation/contact, "/" jumps to search.
@@ -315,6 +417,22 @@ async function loadHiddenBar(kind, peer) {
   $("#toggle-hidden")?.addEventListener("click", (e) => { e.preventDefault(); showHidden = !showHidden; openThread(kind, peer); });
 }
 
+// Recent conversations kept in memory so reopening one is instant, and a fetch
+// started when a finger lands on a chat row (it's usually done by the tap).
+const threadCache = new Map(), prefetched = new Map();
+function fetchThread(kind, peer) {
+  const url = `/messages/${kind}/${encodeURIComponent(peer)}${showHidden ? "?hidden=true" : ""}`;
+  const pre = prefetched.get(url); prefetched.delete(url);
+  return pre && Date.now() - pre.t < 4000 ? pre.p : api(url);
+}
+document.addEventListener("pointerdown", (e) => {
+  const a = e.target.closest?.('a[href^="#/dm/"], a[href^="#/chan/"]'); if (!a) return;
+  const [, kind, peer] = a.getAttribute("href").split("/");
+  const url = `/messages/${kind}/${peer}${showHidden ? "?hidden=true" : ""}`;
+  if (prefetched.has(url)) return;
+  const p = api(url); p.catch(() => {});
+  prefetched.set(url, { p, t: Date.now() });
+}, { passive: true });
 async function openThread(kind, peer) {
   const my = nav;
   $("#v-thread").hidden = false;
@@ -322,19 +440,26 @@ async function openThread(kind, peer) {
   $("#title").textContent = kind === "chan" ? chanName(peer) : contactName(peer);
   const pr = kind === "dm" && presence(contactByPrefix(peer));
   if (pr) $("#title").insertAdjacentHTML("beforeend", ` <small class="presence ${pr.cls}" title="${esc(pr.how)}">${esc(pr.text)}</small>`);
-  if (!S.thread.length || S.thread[0]?.peer !== peer) $("#msgs").innerHTML = `<p class="empty">Loading…</p>`;
-  if (S.threadKey !== `${kind}:${peer}`) { S.threadKey = `${kind}:${peer}`; S.seen = null; clearReply(); }
-  let last = 0;
-  try { last = (await api(`/read/${kind}/${encodeURIComponent(peer)}`)).last_read || 0; } catch { /* offline */ }
+  const key = `${kind}:${peer}`, cached = threadCache.get(key);
+  if (S.threadKey !== key) {
+    S.threadKey = key; S.seen = null; clearReply();
+    // Show what we had straight away; the fresh copy replaces it in a moment.
+    if (cached) { S.thread = cached; S.lastRead = 0; renderThread(true); }
+    else { S.thread = []; $("#msgs").innerHTML = `<p class="empty">Loading…</p>`; }
+  }
+  const readP = api(`/read/${kind}/${encodeURIComponent(peer)}`).then((r) => r.last_read || 0, () => 0);
+  const rowsP = fetchThread(kind, peer);
+  if (!cached) navWait = Promise.all([readP, rowsP]).then(() => new Promise(requestAnimationFrame), () => {});
+  const last = await readP;
   if (my !== nav) return;
   S.lastRead = last;
   markRead(kind, peer);   // advances read to now; S.lastRead holds where we were
   let rows;
-  try { rows = await api(`/messages/${kind}/${encodeURIComponent(peer)}${showHidden ? "?hidden=true" : ""}`); }
-  catch { if (my === nav) $("#msgs").innerHTML = `<p class="empty">Can't load messages — the bridge isn't reachable.</p>`; return; }
+  try { rows = await rowsP; }
+  catch { if (my === nav && !cached) $("#msgs").innerHTML = `<p class="empty">Can't load messages — the bridge isn't reachable.</p>`; return; }
   if (my !== nav) return;
   S.thread = rows;
-  renderThread(true);
+  renderThread(!cached);
   loadHiddenBar(kind, peer);
 }
 
@@ -493,8 +618,26 @@ function msgHtml(m, reacts = null, fresh = new Set()) {
     ${reactsHtml(reacts, fresh)}<div class="foot">${dmBadges}${warn}${sig}${hops}${rtt}<span>${hhmm(m.ts)}</span>${m.kind === "chan" && m.direction === "out" ? echo : dmEcho + st}</div>${failHint}${chanHint}${resend}</div>`;
 }
 
+// The sheet slides away rather than vanishing. Every close goes through this,
+// including Esc and the Close button.
+const sheetEl = $("#sheet"), nativeClose = HTMLDialogElement.prototype.close;
+let sheetOut = null;
+sheetEl.close = function (v) {
+  if (sheetOut) return;
+  if (!this.open || calmMq.matches || !this.animate) return nativeClose.call(this, v);
+  this.classList.add("closing");
+  sheetOut = this.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(1.5rem)" }],
+    { duration: 150, easing: "cubic-bezier(.4, 0, 1, 1)" });
+  sheetOut.onfinish = () => { sheetOut = null; this.classList.remove("closing"); nativeClose.call(this, v); };
+};
+sheetEl.addEventListener("cancel", (e) => { e.preventDefault(); sheetEl.close(); });
+sheetEl.addEventListener("submit", (e) => {
+  if (e.target.method !== "dialog") return;
+  e.preventDefault(); sheetEl.close(e.submitter?.value ?? "");
+});
 function showSheet(html, { noClose = false } = {}) {
   const d = $("#sheet");
+  if (sheetOut) { sheetOut.cancel(); sheetOut = null; d.classList.remove("closing"); }
   $("#sheet-body").innerHTML = html;
   d.querySelector(":scope > form[method=dialog]").hidden = noClose;   // not a form inside the body
   if (!d.open) d.showModal();
@@ -880,6 +1023,10 @@ function renderThread(forceBottom = false) {
   // Only messages (and reactions) that arrived since the last render animate in.
   const fresh = new Set(S.seen ? S.thread.filter((m) => !S.seen.has(m.id)).map((m) => m.id) : []);
   S.seen = new Set(S.thread.map((m) => m.id));
+  if (S.threadKey) {
+    threadCache.delete(S.threadKey); threadCache.set(S.threadKey, S.thread);
+    if (threadCache.size > 20) threadCache.delete(threadCache.keys().next().value);
+  }
   // First message newer than where we last read — the divider goes before it,
   // but only when there's at least one older (read) message above it.
   const idx = lr ? shown.findIndex((m) => m.ts > lr) : -1;
