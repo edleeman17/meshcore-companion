@@ -2022,7 +2022,35 @@ function fillSettings() {
   f.people_cap.value = s.people_cap ?? "";
   f.ble_pin.value = "";
   f.ble_pin.placeholder = s.device?.ble_pin ? `currently fixed (${s.device.ble_pin})` : "currently random each boot";
+  loadRadioSettings();
 }
+
+// Everything else the radio exposes (LoRa, telemetry, tuning, board variables like GPS).
+const RS_FIELDS = { radio_freq: "radio_freq", radio_bw: "radio_bw", radio_sf: "radio_sf", radio_cr: "radio_cr",
+  adv_loc_policy: "adv_loc_policy", telemetry_base: "telemetry_mode_base", telemetry_loc: "telemetry_mode_loc",
+  telemetry_env: "telemetry_mode_env", path_hash_mode: "path_hash_mode", tz_offset: "tz_offset",
+  airtime_factor: "airtime_factor", rx_delay: "rx_delay" };
+async function loadRadioSettings() {
+  let r; try { r = S.rs = await api("/radio/settings"); } catch { return; }
+  const f = $("#settings");
+  for (const [field, key] of Object.entries(RS_FIELDS)) if (f[field] && r[key] != null) f[field].value = r[key];
+  f.multi_acks.checked = !!r.multi_acks;
+  f.tz_offset.closest("label").hidden = r.tz_offset == null;   // firmware before v1.18 has no CLI
+  $("#lora-unlock").checked = false; $("#lora").disabled = true;
+  $("#lora-preset").value = [r.radio_freq, r.radio_bw, r.radio_sf, r.radio_cr].join(",");
+  const cv = r.custom || {};
+  $("#gps-box").innerHTML = ("gps" in cv
+    ? `<label class="check"><input id="cv-gps" type="checkbox" ${cv.gps === "1" ? "checked" : ""}> GPS on</label>
+       <small class="hint">With GPS on, the radio keeps its own location up to date (the fields above are then overwritten).</small>`
+    : `<small class="hint">No GPS module detected. The radio only offers GPS when one is plugged into its GPS connector at power-on.</small>`)
+    + Object.keys(cv).filter((k) => k !== "gps").map((k) => `<label>${esc(k)} <input data-cv="${esc(k)}" value="${esc(cv[k])}"></label>`).join("");
+}
+$("#lora-unlock").onchange = (e) => ($("#lora").disabled = !e.target.checked);
+$("#lora-preset").onchange = (e) => {
+  if (!e.target.value) return;
+  const [fr, bw, sf, cr] = e.target.value.split(","), f = $("#settings");
+  f.radio_freq.value = fr; f.radio_bw.value = bw; f.radio_sf.value = sf; f.radio_cr.value = cr;
+};
 $("#settings").onsubmit = async (e) => {
   e.preventDefault();
   const f = e.target, body = {};
@@ -2033,9 +2061,28 @@ $("#settings").onsubmit = async (e) => {
   if (f.auto_manage.checked !== (S.state.auto_manage !== false)) body.auto_manage = f.auto_manage.checked;
   if (f.people_cap.value && +f.people_cap.value !== S.state.people_cap) body.people_cap = +f.people_cap.value;
   if (f.ble_pin.value) body.ble_pin = +f.ble_pin.value;
+  const r = S.rs;
+  if (r) {
+    const num = (k) => (f[k].value === "" ? null : +f[k].value);
+    if (!$("#lora").disabled) {
+      const lora = ["radio_freq", "radio_bw", "radio_sf", "radio_cr"].map(num);
+      if (lora.some((v, i) => v !== r[["radio_freq", "radio_bw", "radio_sf", "radio_cr"][i]])) {
+        if (lora.includes(null)) return toast("Fill in all four LoRa values", "err");
+        [body.radio_freq, body.radio_bw, body.radio_sf, body.radio_cr] = lora;
+      }
+    }
+    for (const k of ["adv_loc_policy", "telemetry_base", "telemetry_loc", "telemetry_env", "path_hash_mode", "tz_offset", "airtime_factor", "rx_delay"])
+      if (num(k) != null && num(k) !== r[RS_FIELDS[k]]) body[k] = num(k);
+    if (f.multi_acks.checked !== !!r.multi_acks) body.multi_acks = f.multi_acks.checked ? 1 : 0;
+    const custom = {};
+    const gps = $("#cv-gps");
+    if (gps && (gps.checked ? "1" : "0") !== r.custom.gps) custom.gps = gps.checked ? "1" : "0";
+    f.querySelectorAll("[data-cv]").forEach((i) => { if (i.value !== r.custom[i.dataset.cv]) custom[i.dataset.cv] = i.value; });
+    if (Object.keys(custom).length) body.custom = custom;
+  }
   if (!Object.keys(body).length) return toast("Nothing changed");
-  const btn = f.querySelector("button"); btn.disabled = true;
-  try { S.state = { ...S.state, ...(await api("/settings", { method: "POST", body: JSON.stringify(body) })) }; renderRadio(); fillSettings(); toast("Saved to radio"); }
+  const btn = f.querySelector("button.primary"); btn.disabled = true;
+  try { S.state = { ...S.state, ...(await api("/settings", { method: "POST", body: JSON.stringify(body) })) }; renderRadio(); fillSettings(); toast(`Saved to radio: ${Object.keys(body).length} setting${Object.keys(body).length === 1 ? "" : "s"}`); }
   catch (err) { fail(err, "Couldn't save"); }
   finally { btn.disabled = false; }
 };

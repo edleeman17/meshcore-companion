@@ -535,3 +535,9 @@ a.btn { text-decoration: none; display: inline-flex; align-items: center; justif
 #title .presence { font-size: .72rem; font-weight: 500; color: var(--muted); white-space: nowrap; }
 #title .presence::before { content: ""; display: inline-block; width: .5rem; height: .5rem; margin-right: .3rem; background: var(--faint); vertical-align: .05em; }
 #title .presence.p-on::before { background: var(--ok); } #title .presence.p-recent::before { background: var(--warn); }
+
+/* ---- radio settings sections ---- */
+#settings > h2.sub { margin: 1.2rem 0 0; }
+#settings > h2.sub:first-child { margin-top: 0; }
+fieldset#lora { border: 0; padding: 0; margin: 0; min-width: 0; }
+fieldset#lora:disabled { opacity: .55; }

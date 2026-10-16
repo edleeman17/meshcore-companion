@@ -239,18 +239,57 @@
     </div>
     <div class="subpage" data-sub="settings" data-title="Radio settings" hidden>
     <form id="settings" class="form">
+      <h2 class="sub">Identity</h2>
       <label>Name <input name="name" autocomplete="off"></label>
-      <label>TX power (dBm) <input name="tx_power" type="number" min="1" max="30"></label>
+      <label>Fixed Bluetooth PIN <input name="ble_pin" inputmode="numeric" pattern="[0-9]{6}" placeholder="6 digits (blank = keep)"></label>
+      <small class="hint">A fixed PIN stops pairing breaking every time the radio reboots. Applies after a reboot; then re-pair the bridge host with it.</small>
+
+      <h2 class="sub">Location and GPS</h2>
       <div class="two">
         <label>Latitude <input name="lat" type="number" step="any"></label>
         <label>Longitude <input name="lon" type="number" step="any"></label>
       </div>
+      <label>Location in your adverts
+        <select name="adv_loc_policy"><option value="0">Don't share</option><option value="1">Share it</option></select></label>
+      <div id="gps-box"></div>
+
+      <h2 class="sub">LoRa</h2>
+      <label>TX power (dBm) <input name="tx_power" type="number" min="1" max="30"></label>
+      <label class="check"><input id="lora-unlock" type="checkbox"> Change frequency and modem settings</label>
+      <small class="hint">Everyone you talk to must use exactly the same four values. A mismatch cuts you off the mesh until you change them back.</small>
+      <fieldset id="lora" class="form" disabled>
+        <label>Preset <select id="lora-preset"><option value="">Custom</option><option value="869.618,62.5,8,8">UK/EU Narrow — 869.618 MHz, 62.5 kHz, SF8, CR8</option></select></label>
+        <div class="two">
+          <label>Frequency (MHz) <input name="radio_freq" type="number" step="0.001" min="137" max="1020"></label>
+          <label>Bandwidth (kHz) <select name="radio_bw"><option value="7.8">7.8</option><option value="10.4">10.4</option><option value="15.6">15.6</option><option value="20.8">20.8</option><option value="31.25">31.25</option><option value="41.7">41.7</option><option value="62.5">62.5</option><option value="125">125</option><option value="250">250</option><option value="500">500</option></select></label>
+          <label>Spreading factor <input name="radio_sf" type="number" min="5" max="12"></label>
+          <label>Coding rate (4/x) <input name="radio_cr" type="number" min="5" max="8"></label>
+        </div>
+      </fieldset>
+
+      <h2 class="sub">Who can read your telemetry</h2>
+      <div class="two">
+        <label>Battery and status <select name="telemetry_base"><option value="0">Nobody</option><option value="1">Contacts I allow</option><option value="2">Everyone</option></select></label>
+        <label>Location <select name="telemetry_loc"><option value="0">Nobody</option><option value="1">Contacts I allow</option><option value="2">Everyone</option></select></label>
+        <label>Sensors <select name="telemetry_env"><option value="0">Nobody</option><option value="1">Contacts I allow</option><option value="2">Everyone</option></select></label>
+      </div>
+      <small class="hint">"Contacts I allow" uses each contact's permission. Battery-and-status set to Nobody also means silent pings to your radio get no answer.</small>
+
+      <h2 class="sub">Contacts</h2>
       <label class="check"><input name="manual_add_contacts" type="checkbox"> Only add contacts manually</label>
       <label class="check"><input name="auto_manage" type="checkbox"> Auto-manage contacts</label>
       <small class="hint">Adds people and rooms you hear, never keeps repeaters, and rotates out the oldest non-favourite person when full. Favourites (★) are never removed.</small>
       <label>Keep at most this many people <input name="people_cap" type="number" min="10" max="300" placeholder="200"></label>
-      <label>Fixed Bluetooth PIN <input name="ble_pin" inputmode="numeric" pattern="[0-9]{6}" placeholder="6 digits (blank = keep)"></label>
-      <small class="hint">A fixed PIN stops pairing breaking every time the radio reboots. Applies after a reboot; then re-pair the bridge host with it.</small>
+
+      <h2 class="sub">Advanced</h2>
+      <div class="two">
+        <label>Path hashes <select name="path_hash_mode"><option value="0">1-byte (classic)</option><option value="1">2-byte</option></select></label>
+        <label>Screen clock (UTC ±h) <input name="tz_offset" type="number" min="-12" max="14"></label>
+        <label>Airtime factor <input name="airtime_factor" type="number" step="0.1" min="0" max="9"></label>
+        <label>RX delay base <input name="rx_delay" type="number" step="0.1" min="0" max="20"></label>
+      </div>
+      <label class="check"><input name="multi_acks" type="checkbox"> Send extra delivery receipts (more reliable, more airtime)</label>
+      <small class="hint">Airtime factor spaces out your transmissions (1.0 is normal; higher is quieter). RX delay makes your radio wait before repeating weak packets. Leave both alone unless you know why.</small>
       <button class="btn primary">Save to radio</button>
     </form>
     </div>

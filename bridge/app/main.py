@@ -861,9 +861,27 @@ def notify_offline(body: BackIn):
 
 
 # ---------- device settings ----------
+LORA_BWS = (7.8, 10.4, 15.6, 20.8, 31.25, 41.7, 62.5, 125.0, 250.0, 500.0)
+
+
 class Settings(BaseModel):
     name: str | None = None
     tx_power: int | None = None
+    # LoRa: all four go together (a mismatch with your neighbours cuts you off the mesh)
+    radio_freq: float | None = None
+    radio_bw: float | None = None
+    radio_sf: int | None = None
+    radio_cr: int | None = None
+    rx_delay: float | None = None          # rx delay base, seconds-ish float (firmware stores ×1000)
+    airtime_factor: float | None = None    # duty-cycle spacing multiplier
+    adv_loc_policy: int | None = None      # 0 = keep location out of adverts, 1 = share it
+    multi_acks: int | None = None          # 0/1: send extra ACKs for reliability
+    telemetry_base: int | None = None      # 0 deny, 1 contacts you allow, 2 everyone
+    telemetry_loc: int | None = None
+    telemetry_env: int | None = None
+    path_hash_mode: int | None = None      # 0 = 1-byte path hashes, 1 = 2-byte
+    tz_offset: int | None = None           # clock on the radio's screen (fw v1.18+)
+    custom: dict[str, str] | None = None   # board variables, e.g. {"gps": "1", "gps_interval": "300"}
     lat: float | None = None
     lon: float | None = None
     manual_add_contacts: bool | None = None
@@ -883,6 +901,46 @@ async def settings(body: Settings):
         await radio.command("set_coords", body.lat, body.lon)
     if body.manual_add_contacts is not None:
         await radio.command("set_manual_add_contacts", body.manual_add_contacts)
+    lora = (body.radio_freq, body.radio_bw, body.radio_sf, body.radio_cr)
+    if any(v is not None for v in lora):
+        if None in lora:
+            raise ValueError("set frequency, bandwidth, spreading factor and coding rate together")
+        if not 137 <= body.radio_freq <= 1020:
+            raise ValueError("frequency must be 137–1020 MHz")
+        if body.radio_bw not in LORA_BWS:
+            raise ValueError(f"bandwidth must be one of {', '.join(f'{b:g}' for b in LORA_BWS)} kHz")
+        if not 5 <= body.radio_sf <= 12 or not 5 <= body.radio_cr <= 8:
+            raise ValueError("spreading factor must be 5–12 and coding rate 5–8")
+        await radio.command("set_radio", body.radio_freq, body.radio_bw, body.radio_sf, body.radio_cr)
+    if body.rx_delay is not None or body.airtime_factor is not None:
+        cur = await radio.command("get_tuning")
+        rx = round(body.rx_delay * 1000) if body.rx_delay is not None else cur.get("rx_delay", 0)
+        af = round(body.airtime_factor * 1000) if body.airtime_factor is not None else cur.get("airtime_factor", 1000)
+        if not 0 <= af <= 9000 or not 0 <= rx <= 20000:
+            raise ValueError("airtime factor must be 0–9 and rx delay 0–20")
+        await radio.command("set_tuning", rx, af)
+    other = {"adv_loc_policy": body.adv_loc_policy, "multi_acks": body.multi_acks,
+             "telemetry_mode_base": body.telemetry_base, "telemetry_mode_loc": body.telemetry_loc,
+             "telemetry_mode_env": body.telemetry_env}
+    if any(v is not None for v in other.values()):
+        si = dict(radio.mc.self_info)
+        infos = {k: int(si.get(k) or 0) for k in ("manual_add_contacts", "multi_acks", "adv_loc_policy",
+                                                  "telemetry_mode_base", "telemetry_mode_loc", "telemetry_mode_env")}
+        infos.update({k: int(v) for k, v in other.items() if v is not None})
+        if not all(0 <= infos[k] <= 2 for k in infos):
+            raise ValueError("telemetry modes are 0–2, location policy and multi-acks 0–1")
+        await radio.command("set_other_params_from_infos", infos)
+    if body.path_hash_mode is not None:
+        if body.path_hash_mode not in (0, 1):
+            raise ValueError("path hash mode is 0 (1-byte) or 1 (2-byte)")
+        await radio.command("set_path_hash_mode", body.path_hash_mode)
+        radio.device["path_hash_mode"] = body.path_hash_mode   # device info is only re-read on connect
+    if body.tz_offset is not None:
+        if not -12 <= body.tz_offset <= 14:
+            raise ValueError("timezone offset must be -12 to +14")
+        await radio.command("run_cli_command", f"set tz.offset {body.tz_offset}")
+    for k, v in (body.custom or {}).items():
+        await radio.command("set_custom_var", k, str(v))
     if body.ble_pin is not None:
         if body.ble_pin and not 100000 <= body.ble_pin <= 999999:
             raise ValueError("PIN must be 6 digits")
@@ -893,6 +951,32 @@ async def settings(body: Settings):
         db.set_setting("people_cap", max(10, body.people_cap))
     await radio.refresh_self()
     return radio.state()
+
+
+@app.get("/api/radio/settings")
+@_offline
+async def radio_settings():
+    """Every setting the radio exposes, with current values, for the settings page."""
+    si = radio.mc.self_info
+    out = {k: si.get(k) for k in ("name", "tx_power", "max_tx_power", "adv_lat", "adv_lon", "radio_freq", "radio_bw",
+                                  "radio_sf", "radio_cr", "manual_add_contacts", "multi_acks", "adv_loc_policy",
+                                  "telemetry_mode_base", "telemetry_mode_loc", "telemetry_mode_env")}
+    try:
+        t = await radio.command("get_tuning")
+        out.update(rx_delay=t.get("rx_delay", 0) / 1000, airtime_factor=t.get("airtime_factor", 1000) / 1000)
+    except Exception:  # noqa: BLE001 — older firmware
+        pass
+    try:
+        out["custom"] = await radio.command("get_custom_vars")
+    except Exception:  # noqa: BLE001
+        out["custom"] = {}
+    out["path_hash_mode"] = (radio.device or {}).get("path_hash_mode")
+    try:   # companion CLI arrived with protocol 14 (fw v1.18)
+        r = (await radio.command("run_cli_command", "get tz.offset")).get("text", "")
+        out["tz_offset"] = int(r.lstrip("> ").strip())
+    except Exception:  # noqa: BLE001
+        out["tz_offset"] = None
+    return out
 
 
 @app.post("/api/reboot")

@@ -32,11 +32,13 @@ A self-hosted web app for your [MeshCore](https://meshcore.io) LoRa radio. A sma
 
 ## Features
 
-**New: 📶 WiFi radio link** — companion firmware v1.18's normal BLE build also speaks WiFi. Set `RADIO_HOST` and the bridge connects over your network instead of Bluetooth (no more BLE drop-outs), while your phone can still use Bluetooth. Set the radio's WiFi from the bridge with `POST /api/radio/cli` (`set wifi.ssid …`, `set wifi.pwd …`, `reboot`), which runs any companion CLI command on your own radio.
+**New: ⚙️ Every radio setting** — Radio → Settings now covers everything the companion firmware exposes: name and BLE PIN; location, whether adverts share it, and **GPS on/off** (shown when the radio detects a GPS module at power-on); TX power and the LoRa preset (frequency, bandwidth, SF, CR — locked behind a checkbox, with the UK/EU Narrow preset); who may read your battery, location and sensor telemetry; contact handling; 1- or 2-byte path hashes, the on-screen clock's timezone, airtime factor, RX delay and extra delivery receipts. Only changed values are written, and LoRa values are validated as a set.
 
-**New: 🟢 Last heard** — a dot on every person in Chats and Contacts, and "heard 5m ago" in the DM header: green under 15 minutes, amber under 2 hours. MeshCore has no presence, so it's the last sign of life the bridge saw (an advert, a DM, a channel post, a delivery receipt or a repeater relaying) — their radio, not whether they're reading.
+**📶 WiFi radio link** — companion firmware v1.18's normal BLE build also speaks WiFi. Set `RADIO_HOST` and the bridge connects over your network instead of Bluetooth (no more BLE drop-outs), while your phone can still use Bluetooth. Set the radio's WiFi from the bridge with `POST /api/radio/cli` (`set wifi.ssid …`, `set wifi.pwd …`, `reboot`), which runs any companion CLI command on your own radio.
 
-**New: likely route on saved-route DMs** — a DM sent down a saved route arrives with no hop list (each repeater removes itself as it forwards). The chip, journey diagram and details now show your saved route to them, reversed, as the likely path, with each 1-byte hop matched to the nearest repeater along the chain.
+**🟢 Last heard** — a dot on every person in Chats and Contacts, and "heard 5m ago" in the DM header: green under 15 minutes, amber under 2 hours. MeshCore has no presence, so it's the last sign of life the bridge saw (an advert, a DM, a channel post, a delivery receipt or a repeater relaying) — their radio, not whether they're reading.
+
+**likely route on saved-route DMs** — a DM sent down a saved route arrives with no hop list (each repeater removes itself as it forwards). The chip, journey diagram and details now show your saved route to them, reversed, as the likely path, with each 1-byte hop matched to the nearest repeater along the chain.
 
 **🔎 Packet inspector** — Signal → Live packets: tap any packet to see its raw bytes as a colour-coded hex dump, with every field named and explained (header, route, each hop by repeater name, advert key/location/name, ACKs, trace SNRs). Channel traffic is **decrypted** with every key the app knows (your channels, Public, discovered `#hashtags`), and signature packets are split into key id, signed time and signature. Filter by type, pause the log, copy the hex, or **Show route on map**. Raw packets are kept for 7 days.
 
