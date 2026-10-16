@@ -20,8 +20,8 @@ A self-hosted web app for your [MeshCore](https://meshcore.io) LoRa radio. A sma
 </tr>
 <tr>
 <td align="center"><img src="docs/screenshots/contacts.png" alt="Contacts"><br><sub><b>Contacts</b> — favourites, nearby now, 1/2-byte path badges</sub></td>
-<td align="center"><img src="docs/screenshots/signal.png" alt="Signal"><br><sub><b>Signal</b> — link health card and SNR / error / airtime charts</sub></td>
-<td align="center"><img src="docs/screenshots/radio.png" alt="Radio"><br><sub><b>Radio</b> — status tiles, battery %, settings, appearance</sub></td>
+<td align="center"><img src="docs/screenshots/signal.png" alt="Signal"><br><sub><b>Signal</b> — link health card, then charts, who you hear and live packets</sub></td>
+<td align="center"><img src="docs/screenshots/radio.png" alt="Radio"><br><sub><b>Radio</b> — status tiles, then settings, notifications, filters and more</sub></td>
 </tr>
 <tr>
 <td align="center"><img src="docs/screenshots/placement.png" alt="Placement mode"><br><sub><b>Placement mode</b> — live signal to every repeater, save and compare spots</sub></td>
