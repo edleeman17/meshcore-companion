@@ -737,6 +737,15 @@ details.fold[open] > summary::after { transform: rotate(180deg); }
 .react b { font: 700 .66rem var(--mono); color: var(--muted); }
 .react.mine { border-color: var(--accent); }
 .react.pending { opacity: .5; }
+button.react { color: inherit; cursor: pointer; min-height: 1.8rem; }
+button.react:hover { background: var(--surface-2); }
+.react-who h4 { margin: 1.1rem 0 .3rem; font: 700 .78rem var(--mono); color: var(--muted); }
+.react-who h4 span { font-size: 1.25rem; vertical-align: middle; margin-right: .2rem; }
+.react-who ul { list-style: none; margin: 0; padding: 0; }
+.react-who li { display: flex; justify-content: space-between; gap: 1rem; padding: .45rem 0; border-top: 1px solid var(--line); }
+.react-who .name { font-weight: 700; }
+.react-who .name.tint { color: var(--tint); }
+.react-who time, .react-who .muted { font-size: .8rem; color: var(--muted); font-variant-numeric: tabular-nums; }
 
 /* ---- reply bar above the composer ---- */
 .composer { flex-wrap: wrap; }
