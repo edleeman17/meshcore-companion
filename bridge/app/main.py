@@ -831,7 +831,7 @@ async def battery_watch_set(key: str, body: BatteryWatchIn):
         prev = w.get(pk, {})
         w[pk] = {"password": body.password if body.password is not None else prev.get("password"),
                  "below": max(5, min(body.below, 90))}
-        db.set_favourite(pk, True)     # a watched repeater must survive auto-manage's repeater purge
+        db.set_favourite(pk, True)     # a watched repeater must survive auto-manage's rotation
     else:
         w.pop(pk, None)
     db.set_setting("battery_watch", w)
@@ -886,8 +886,7 @@ class Settings(BaseModel):
     lon: float | None = None
     manual_add_contacts: bool | None = None
     ble_pin: int | None = None     # fixed 6-digit BLE PIN (0 = random each boot); applies after reboot
-    auto_manage: bool | None = None    # auto-add people, purge repeaters, rotate oldest
-    people_cap: int | None = None      # max non-favourite people before rotating oldest out
+    auto_manage: bool | None = None    # auto-add people, rotate the oldest out only when the radio is full
 
 
 @app.post("/api/settings")
@@ -947,8 +946,6 @@ async def settings(body: Settings):
         await radio.command("set_devicepin", body.ble_pin)
     if body.auto_manage is not None:
         db.set_setting("auto_manage", body.auto_manage)
-    if body.people_cap is not None:
-        db.set_setting("people_cap", max(10, body.people_cap))
     await radio.refresh_self()
     return radio.state()
 

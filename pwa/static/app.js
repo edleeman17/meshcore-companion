@@ -46,6 +46,14 @@ const initial = (name) => {
   const first = seg ? seg.segment(s)[Symbol.iterator]().next().value.segment : Array.from(s)[0];
   return /\p{L}/u.test(first) ? first.toUpperCase() : first;
 };
+// A stable colour per name (FNV-1a hash -> hue), so the same person looks the
+// same in channels, chats and contacts. Saturation/lightness come from the theme.
+const hueOf = (name) => {
+  let h = 2166136261;
+  for (const ch of String(name || "")) h = Math.imul(h ^ ch.codePointAt(0), 16777619);
+  return (h >>> 0) % 360;
+};
+const tint = (name) => ` style="--h:${hueOf(name)}"`;
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 
 // Toasts replace alert(): iOS home-screen apps can suppress native dialogs.
@@ -84,9 +92,15 @@ let wide = wideMq.matches;
 document.body.classList.toggle("wide", wide);
 const isSplit = () => document.body.classList.contains("split");
 
+let settleTimer;
 function go() {
   nav++;
   $("#sheet").open && $("#sheet").close();
+  closeMsgMenu();
+  // Lists animate in once per visit, not on every live refresh.
+  document.querySelectorAll(".list.settled").forEach((l) => l.classList.remove("settled"));
+  clearTimeout(settleTimer);
+  settleTimer = setTimeout(() => document.querySelectorAll(".list").forEach((l) => l.classList.add("settled")), 900);
   const parts = (location.hash.replace(/^#\/?/, "") || "chats").split("/").map(decodeURIComponent);
   S.route = parts;
   const tab = ["dm", "chan"].includes(parts[0]) ? "chats" : parts[0] === "contact" ? "contacts"
@@ -193,13 +207,22 @@ const likelyRoute = (m) => {
 };
 
 const routeText = (c) => c.path_len < 0 ? "no fixed route" : c.path_len === 0 ? "direct" : `${c.path_len} hop${c.path_len === 1 ? "" : "s"}`;
+// The list's preview line says who spoke last: "You: …", or the sender in a channel.
+function lastLine(c) {
+  if (!c.last_text) return "&nbsp;";
+  const r = parseReaction(c.last_text);
+  const who = c.last_dir === "out" ? "You" : c.kind === "chan" ? c.last_sender : "";
+  const by = !who ? "" : who === "You" ? `<span class="by">You${r ? "" : ":"}</span> `
+    : `<span class="by tint"${tint(who)}>${esc(who)}${r ? "" : ":"}</span> `;
+  return by + (r ? `${who ? "reacted" : "Reacted"} ${esc(r.emoji)}` : esc(c.last_text));
+}
 const convRow = (c) => {
   const name = c.kind === "chan" ? chanName(c.peer) : c.name || contactName(c.peer);
   const unread = c.unread ? ` unread` : "";
   const cur = S.route[0] === c.kind && S.route[1] === c.peer ? ` aria-current="true"` : "";
   return `<a href="#/${c.kind}/${esc(c.peer)}" class="${unread}"${cur}>
-    <span class="badge${c.kind === "chan" ? " chan" : ""}">${c.kind === "chan" ? "#" : esc(initial(name)) + presenceDot(contactByPrefix(c.peer))}</span>
-    <span class="meta"><div class="name">${esc(name)}</div><div class="last">${esc(c.last_text) || "&nbsp;"}</div></span>
+    ${c.kind === "chan" ? `<span class="badge chan">#</span>` : `<span class="badge tint"${tint(name)}>${esc(initial(name)) + presenceDot(contactByPrefix(c.peer))}</span>`}
+    <span class="meta"><div class="name">${esc(name)}</div><div class="last">${lastLine(c)}</div></span>
     <span class="when">${c.last_ts ? ago(c.last_ts) : ""}${c.mentions || c.unread ? `<span class="marks">${c.mentions ? '<span class="at" title="You were mentioned">@</span>' : ""}${c.unread ? `<span class="count-badge">${c.unread}</span>` : ""}</span>` : ""}</span></a>`;
 };
 
@@ -224,7 +247,7 @@ async function loadConvs() {
   const people = S.contacts.filter((c) => c.type === 1 && !seen.has(`dm:${c.prefix}`));
   $("#people-wrap").hidden = !people.length;
   $("#people").innerHTML = people.map((c) => `<a href="#/dm/${c.prefix}"${S.route[0] === "dm" && S.route[1] === c.prefix ? ` aria-current="true"` : ""}>
-      <span class="badge">${esc(initial(c.name))}</span>
+      <span class="badge tint"${tint(c.name)}>${esc(initial(c.name))}</span>
       <span class="meta"><div class="name">${esc(c.name)}</div><div class="last">${routeText(c)}</div></span></a>`).join("");
 }
 const loadConvsSoon = debounce(() => { if (S.route[0] === "chats" || (isSplit() && ["dm", "chan"].includes(S.route[0]))) loadConvs(); }, 500);
@@ -245,7 +268,7 @@ $("#search").addEventListener("input", () => {
     try {
       const rows = await api(`/search?q=${encodeURIComponent(q)}`);
       $("#results").innerHTML = rows.map((m) => `<a href="#/${m.kind}/${esc(m.peer)}">
-        <span class="badge${m.kind === "chan" ? " chan" : ""}">${m.kind === "chan" ? "#" : esc(initial(m.where))}</span>
+        ${m.kind === "chan" ? `<span class="badge chan">#</span>` : `<span class="badge tint"${tint(m.where)}>${esc(initial(m.where))}</span>`}
         <span class="meta"><div class="name">${esc(m.where)}${m.sender && m.kind === "chan" ? ` · ${esc(m.sender)}` : ""}</div>
         <div class="last">${esc(m.text)}</div></span><span class="when">${ago(m.ts)}</span></a>`).join("") || `<p class="empty">No messages match "${esc(q)}".</p>`;
     } catch (err) { fail(err, "Search failed"); }
@@ -300,6 +323,7 @@ async function openThread(kind, peer) {
   const pr = kind === "dm" && presence(contactByPrefix(peer));
   if (pr) $("#title").insertAdjacentHTML("beforeend", ` <small class="presence ${pr.cls}" title="${esc(pr.how)}">${esc(pr.text)}</small>`);
   if (!S.thread.length || S.thread[0]?.peer !== peer) $("#msgs").innerHTML = `<p class="empty">Loading…</p>`;
+  if (S.threadKey !== `${kind}:${peer}`) { S.threadKey = `${kind}:${peer}`; S.seen = null; clearReply(); }
   let last = 0;
   try { last = (await api(`/read/${kind}/${encodeURIComponent(peer)}`)).last_read || 0; } catch { /* offline */ }
   if (my !== nav) return;
@@ -312,6 +336,69 @@ async function openThread(kind, peer) {
   S.thread = rows;
   renderThread(true);
   loadHiddenBar(kind, peer);
+}
+
+// ---------- reactions ----------
+// MeshCore has no reaction packet, so a reaction is an ordinary short message any
+// client can read: "@[Alice] 👍" in a channel (or a room), just "👍" in a DM, plus
+// ` "quote…"` when it's for an older message than their latest. This app folds
+// them under the message they're for; other apps show them as a normal message.
+const REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
+const QUOTE_MAX = 24;
+const EMOJI_RE = /^(?:\p{Extended_Pictographic}|\p{Emoji_Modifier}|\p{Regional_Indicator}|\uFE0F|\u200D)+$/u;
+const REACT_RE = /^(?:@\[([^\]]{1,32})\] )?(\S{1,16})(?: "(.{1,40})")?$/su;
+const isEmoji = (t) => EMOJI_RE.test(t) && (!seg || [...seg.segment(t)].length === 1);
+function parseReaction(t) {
+  const m = REACT_RE.exec(String(t || "").trim());
+  if (!m || !isEmoji(m[2])) return null;
+  return { to: m[1] || null, emoji: m[2], quote: m[3] ? m[3].replace(/…$/, "") : null };
+}
+// The message a reaction (row i of rows, parsed as p) is for: the latest earlier
+// message from whoever it names (you, if it names your radio), matching the quote.
+function reactionTarget(rows, r, p, i) {
+  const me = S.state?.name;
+  const from = (m) => p.to ? (p.to === me ? m.direction === "out" : m.direction === "in" && m.sender === p.to)
+    : r.kind === "chan" ? m.sender !== r.sender || m.direction !== r.direction
+    : m.direction !== r.direction;
+  for (let j = i - 1; j >= Math.max(0, i - 300); j--) {
+    const m = rows[j];
+    if (from(m) && !parseReaction(m.text) && (!p.quote || m.text.startsWith(p.quote))) return m;
+  }
+  return null;
+}
+// Whose name a reaction to m carries: channel and room posts name their author.
+const reactTo = (m) => m.kind === "chan" || (m.sender && m.sender !== contactName(m.peer)) ? m.sender : null;
+function reactionText(m, emoji) {
+  const to = reactTo(m), p = { to, emoji, quote: null };
+  const mine = { kind: m.kind, direction: "out", sender: S.state?.name };
+  const latest = reactionTarget(S.thread, mine, p, S.thread.length) === m;
+  const quote = latest ? "" : m.text.length > QUOTE_MAX ? m.text.slice(0, QUOTE_MAX).trimEnd() + "…" : m.text;
+  return (to ? `@[${to}] ` : "") + emoji + (quote ? ` "${quote}"` : "");
+}
+// Reactions grouped onto their target message id; their own rows are hidden.
+// A reaction of yours that failed stays a normal bubble so it can be resent.
+function groupReactions(rows) {
+  const on = new Map(), hide = new Set();
+  rows.forEach((m, i) => {
+    const p = parseReaction(m.text);
+    if (!p || (m.direction === "out" && m.status === "failed")) return;
+    const t = reactionTarget(rows, m, p, i); if (!t) return;
+    hide.add(m.id);
+    if (!on.has(t.id)) on.set(t.id, []);
+    on.get(t.id).push({ id: m.id, emoji: p.emoji, mine: m.direction === "out", pending: m.status === "sending",
+      who: m.direction === "out" ? "You" : m.sender || contactName(m.peer) });
+  });
+  return { on, hide };
+}
+function reactsHtml(list, fresh) {
+  if (!list?.length) return "";
+  const by = new Map();
+  for (const r of list) { if (!by.has(r.emoji)) by.set(r.emoji, []); by.get(r.emoji).push(r); }
+  return `<div class="reacts">${[...by].map(([emoji, rs]) => {
+    const cls = (rs.some((r) => r.mine) ? " mine" : "") + (rs.every((r) => r.pending) ? " pending" : "");
+    const anim = rs.some((r) => fresh.has(r.id)) ? "" : ` style="animation:none"`;
+    return `<span class="react${cls}"${anim} title="${esc(rs.map((r) => r.who).join(", "))}">${emoji}${rs.length > 1 ? `<b>${rs.length}</b>` : ""}</span>`;
+  }).join("")}</div>`;
 }
 
 // Inline contact cards people paste in chat: <64-hex pubkey:type:name>
@@ -357,7 +444,7 @@ function signedChip(m) {
   return ` <span class="chip" title="Relayed with author tag ${esc(m.signed_name || m.signed)}">🔏</span>`;
 }
 
-function msgHtml(m) {
+function msgHtml(m, reacts = null, fresh = new Set()) {
   const dmFailWord = m.echoes ? "no receipt" : "not sent";
   const stWord = m.kind === "dm"
     ? { sending: "sending…", delivered: "✓ delivered", failed: `✗ ${dmFailWord}`, sent: "sent" }
@@ -389,7 +476,7 @@ function msgHtml(m) {
   const signedBadge = signedChip(m);
   // In a 1:1 DM the sender is obvious — only channels and room posts get a name line.
   const showWho = m.direction === "in" && (m.kind === "chan" || roomAuthor) && m.sender;
-  const who = showWho ? `<div class="who" data-mention="${esc(m.sender)}">${esc(m.sender)}${badge}${signedBadge}</div>` : "";
+  const who = showWho ? `<div class="who tint" data-mention="${esc(m.sender)}"${tint(m.sender)}>${esc(m.sender)}${badge}${signedBadge}</div>` : "";
   const dmBadges = !showWho && m.direction === "in" ? badge + signedBadge : "";
   const canResend = m.direction === "out" && (m.status === "failed" ||
     (m.kind === "chan" && m.status === "sent" && !m.echoes && Date.now() - m.ts > 60000));
@@ -401,8 +488,9 @@ function msgHtml(m) {
         : "No repeater picked this up, so it didn't get out. Resend."}</p>` : "";
   const chanHint = m.direction === "out" && (chanStale || (m.kind === "chan" && m.status === "failed"))
     ? `<p class="hint-line">No repeater was heard carrying this, so it didn't get out. Resend.</p>` : "";
-  return `<div class="msg ${m.direction}${m.mention ? " mention" : ""}${m.hidden ? " is-hidden" : ""}" data-id="${m.id}">${who}<div class="text">${renderText(m.text)}</div>
-    <div class="foot">${dmBadges}${warn}${sig}${hops}${rtt}<span>${hhmm(m.ts)}</span>${m.kind === "chan" && m.direction === "out" ? echo : dmEcho + st}</div>${failHint}${chanHint}${resend}</div>`;
+  const arrive = fresh.has(m.id) ? " arrive" : "";
+  return `<div class="msg ${m.direction}${m.mention ? " mention" : ""}${m.hidden ? " is-hidden" : ""}${arrive}" data-id="${m.id}"><span class="swipe-ico" aria-hidden="true">↩</span>${who}<div class="text">${renderText(m.text)}</div>
+    ${reactsHtml(reacts, fresh)}<div class="foot">${dmBadges}${warn}${sig}${hops}${rtt}<span>${hhmm(m.ts)}</span>${m.kind === "chan" && m.direction === "out" ? echo : dmEcho + st}</div>${failHint}${chanHint}${resend}</div>`;
 }
 
 function showSheet(html, { noClose = false } = {}) {
@@ -657,6 +745,128 @@ $("#msgs").addEventListener("click", async (e) => {
   const m = S.thread.find((x) => x.id === +el.dataset.id); if (m) msgDetails(m);
 });
 
+// ---------- message gestures: hold (or right-click) for reactions, swipe right to reply ----------
+let gest = null, menuMsg = null, eatClick = false;
+const msgOf = (el) => S.thread.find((x) => x.id === +el.dataset.id);
+const swallowClick = () => { eatClick = true; setTimeout(() => (eatClick = false), 400); };
+$("#msgs").addEventListener("click", (e) => { if (eatClick) { e.stopPropagation(); e.preventDefault(); eatClick = false; } }, true);
+$("#msgs").addEventListener("pointerdown", (e) => {
+  const el = e.target.closest(".msg");
+  if (!el || e.button > 0 || e.target.closest("button, a, [data-card-key]")) return;
+  gest = { el, id: e.pointerId, x: e.clientX, y: e.clientY, dx: 0, swipe: false, touch: e.pointerType !== "mouse" };
+  gest.timer = setTimeout(() => {
+    if (!gest || gest.swipe) return;
+    gest.held = true;          // the tap that ends this hold mustn't also open details
+    navigator.vibrate?.(8);
+    openMsgMenu(el);
+  }, 450);
+});
+$("#msgs").addEventListener("pointermove", (e) => {
+  if (!gest || e.pointerId !== gest.id || gest.held) return;
+  const dx = e.clientX - gest.x, dy = e.clientY - gest.y;
+  if (!gest.swipe) {
+    if (Math.hypot(dx, dy) < 8) return;
+    clearTimeout(gest.timer);
+    if (!gest.touch || dx < 0 || Math.abs(dx) < Math.abs(dy) * 1.5) { gest = null; return; }   // a scroll, not a swipe
+    gest.swipe = true; gest.el.classList.add("swiping");
+  }
+  gest.dx = Math.max(0, Math.min(dx, 96));
+  const pull = gest.dx < 60 ? gest.dx : 60 + (gest.dx - 60) * .35;   // resists past the trigger point
+  gest.el.style.transform = `translateX(${pull}px)`;
+  gest.el.querySelector(".swipe-ico").style.opacity = Math.min(1, gest.dx / 60);
+  const ready = gest.dx >= 60;
+  if (ready !== gest.el.classList.contains("swipe-ready")) { gest.el.classList.toggle("swipe-ready", ready); if (ready) navigator.vibrate?.(6); }
+});
+const endGesture = (e) => {
+  if (!gest || e.pointerId !== gest.id) return;
+  clearTimeout(gest.timer);
+  const { el, swipe, dx, held } = gest; gest = null;
+  if (held) return swallowClick();
+  if (!swipe) return;
+  swallowClick();
+  el.classList.remove("swiping", "swipe-ready");
+  el.style.transform = ""; el.querySelector(".swipe-ico").style.opacity = "";
+  const m = msgOf(el);
+  if (e.type === "pointerup" && dx >= 60 && m) startReply(m);
+};
+$("#msgs").addEventListener("pointerup", endGesture);
+$("#msgs").addEventListener("pointercancel", endGesture);
+$("#msgs").addEventListener("contextmenu", (e) => {
+  const el = e.target.closest(".msg"); if (!el) return;
+  e.preventDefault();
+  if (menuMsg?.el !== el) openMsgMenu(el);
+});
+
+function closeMsgMenu() {
+  if (!menuMsg) return;
+  menuMsg.menu.remove(); menuMsg.el.classList.remove("held"); menuMsg = null;
+}
+function openMsgMenu(el) {
+  closeMsgMenu();
+  const m = msgOf(el); if (!m) return;
+  const canReact = m.direction === "in" && (m.kind === "dm" || m.sender) && !parseReaction(m.text);
+  const menu = document.createElement("div");
+  menu.className = "react-menu"; menu.setAttribute("role", "menu");
+  menu.innerHTML = (canReact ? `<div class="emojis">${REACTIONS.map((r) => `<button type="button" role="menuitem" data-react="${r}" aria-label="React ${r}">${r}</button>`).join("")}</div>` : "")
+    + `<div class="acts"><button type="button" role="menuitem" data-act="reply">↩ Reply</button><button type="button" role="menuitem" data-act="copy">Copy</button><button type="button" role="menuitem" data-act="info">Details</button></div>`;
+  document.body.append(menu);
+  el.classList.add("held");
+  menuMsg = { menu, el, m };
+  // Above the message if it fits, else below; kept on screen.
+  const r = el.getBoundingClientRect(), w = menu.offsetWidth, h = menu.offsetHeight;
+  const left = Math.min(Math.max(8, m.direction === "out" ? r.right - w : r.left), innerWidth - w - 8);
+  const above = r.top - h - 8 > 8;
+  const top = above ? r.top - h - 8 : Math.min(r.bottom + 8, innerHeight - h - 8);
+  Object.assign(menu.style, { left: left + "px", top: top + "px" });
+  menu.style.setProperty("--oy", above ? "100%" : "0%");
+  menu.style.setProperty("--ox", m.direction === "out" ? "100%" : "0%");
+  menu.querySelector("button").focus({ preventScroll: true });
+  menu.onclick = (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    closeMsgMenu();
+    if (b.dataset.react) sendReaction(m, b.dataset.react);
+    else if (b.dataset.act === "reply") startReply(m);
+    else if (b.dataset.act === "info") msgDetails(m);
+    else if (b.dataset.act === "copy") navigator.clipboard?.writeText(m.text).then(() => toast("Copied"), () => toast("Couldn't copy", "err"));
+  };
+}
+document.addEventListener("pointerdown", (e) => { if (menuMsg && !menuMsg.menu.contains(e.target)) closeMsgMenu(); }, true);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && menuMsg) { e.preventDefault(); closeMsgMenu(); } });
+window.addEventListener("resize", closeMsgMenu);
+for (const el of [document.querySelector("main"), $("#msgs")]) el.addEventListener("scroll", closeMsgMenu, { passive: true });
+
+async function sendReaction(m, emoji) {
+  const [kind, peer] = S.route;
+  try { await api("/send", { method: "POST", body: JSON.stringify({ kind, to: peer, text: reactionText(m, emoji), sign: false }) }); }
+  catch (err) { fail(err, "Reaction not sent"); }
+}
+
+// Replying: a bar above the composer shows what you're answering. In a channel
+// (or room) the post starts with "@[Name] " so they get a mention; the quote
+// itself is never sent, so it costs no bytes.
+let reply = null;
+const replyPrefix = () => reply && reply.direction === "in" && reactTo(reply) ? `@[${reactTo(reply)}] ` : "";
+const withReply = (t) => { const pre = replyPrefix(); return pre && !t.startsWith(pre.trim()) ? pre + t : t; };
+function startReply(m) {
+  reply = m;
+  const who = m.direction === "out" ? "You" : m.sender || contactName(m.peer);
+  const bar = $("#reply-bar") || Object.assign(document.createElement("div"), { id: "reply-bar", className: "reply-bar" });
+  bar.innerHTML = `<span class="rb-text">Replying to <b${who === "You" ? "" : ` class="tint"${tint(who)}`}>${esc(who)}</b> · ${esc(m.text)}</span>
+    <button type="button" aria-label="Cancel reply">✕</button>`;
+  bar.querySelector("button").onclick = () => { clearReply(); text.focus(); };
+  bar.querySelector(".rb-text").onclick = () => {
+    const el = $(`.msg[data-id="${m.id}"]`); if (!el) return;
+    el.scrollIntoView({ block: "center", behavior: "smooth" });
+    el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash");
+  };
+  $("#composer").prepend(bar);
+  text.focus(); text.dispatchEvent(new Event("input"));
+}
+function clearReply() {
+  if (!reply && !$("#reply-bar")) return;
+  reply = null; $("#reply-bar")?.remove(); text.dispatchEvent(new Event("input"));
+}
+
 const mainEl = document.querySelector("main");
 // The conversation scrolls in <main> on phones, in its own pane on desktop.
 const scroller = () => isSplit() ? $("#msgs") : mainEl;
@@ -665,11 +875,16 @@ function renderThread(forceBottom = false) {
   const stick = forceBottom || nearBottom();
   const el = scroller(), keep = el.scrollTop;
   const lr = S.lastRead || 0;
+  const { on, hide } = groupReactions(S.thread);
+  const shown = S.thread.filter((m) => !hide.has(m.id));
+  // Only messages (and reactions) that arrived since the last render animate in.
+  const fresh = new Set(S.seen ? S.thread.filter((m) => !S.seen.has(m.id)).map((m) => m.id) : []);
+  S.seen = new Set(S.thread.map((m) => m.id));
   // First message newer than where we last read — the divider goes before it,
   // but only when there's at least one older (read) message above it.
-  const idx = lr ? S.thread.findIndex((m) => m.ts > lr) : -1;
-  $("#msgs").innerHTML = S.thread.map((m, i) =>
-    (idx > 0 && i === idx ? `<div class="unread-line"><span>New since you last read</span></div>` : "") + msgHtml(m)
+  const idx = lr ? shown.findIndex((m) => m.ts > lr) : -1;
+  $("#msgs").innerHTML = shown.map((m, i) =>
+    (idx > 0 && i === idx ? `<div class="unread-line"><span>New since you last read</span></div>` : "") + msgHtml(m, on.get(m.id), fresh)
   ).join("") || `<p class="empty">Say hello.</p>`;
   requestAnimationFrame(() => {
     const line = forceBottom && idx > 0 ? $(".unread-line") : null;
@@ -713,18 +928,19 @@ function splitMessage(t) {
 
 const text = $("#text");
 text.addEventListener("input", () => {
-  const n = text.value.trim() ? splitMessage(text.value.trim()).length : 1;
+  const val = withReply(text.value);
+  const n = text.value.trim() ? splitMessage(withReply(text.value.trim())).length : 1;
   const c = $("#count");
   const isChan = S.route?.[0] === "chan";
   c.classList.remove("over", "warn");
   c.removeAttribute("title");
   if (signOn && isChan) {
-    const left = LIMIT - blen(text.value);
+    const left = LIMIT - blen(val);
     c.textContent = `🔏 ${left}`;
     c.classList.toggle("over", left < 0 || n > 1);
     c.title = "A signed post must fit one packet.";
   } else if (n <= 1) {
-    c.textContent = LIMIT - blen(text.value);
+    c.textContent = LIMIT - blen(val);
   } else if (isChan) {
     // Each part of a channel post floods every repeater. Warn here only.
     c.textContent = `${n} msgs ⚠`;
@@ -738,6 +954,7 @@ text.addEventListener("input", () => {
 });
 text.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#composer").requestSubmit(); }
+  else if (e.key === "Escape" && reply) { e.preventDefault(); e.stopPropagation(); clearReply(); }
 });
 $("#share-card").onclick = () => {
   const s = S.state;
@@ -770,10 +987,14 @@ function showSignToggle() {
 $("#composer").onsubmit = async (e) => {
   e.preventDefault();
   const [kind, peer] = S.route;
-  const body = text.value.trim();
-  if (!body) return;
+  const typed = text.value.trim();
+  if (!typed) return;
+  const body = withReply(typed);
   const sign = signOn && kind === "chan";
   if (sign && splitMessage(body).length > 1) return toast("Too long to sign — a signed post must fit one message.", "err");
+  const btn = e.target.querySelector("button[type=submit]");
+  btn.classList.remove("sent"); void btn.offsetWidth; btn.classList.add("sent");
+  clearReply();
   text.value = ""; text.dispatchEvent(new Event("input"));
   requestAnimationFrame(() => (scroller().scrollTop = 1e9));
   try { await api("/send", { method: "POST", body: JSON.stringify({ kind, to: peer, text: body, sign }) }); }
@@ -1152,13 +1373,32 @@ addForm.onsubmit = async (e) => {
 };
 
 // ---------- contacts ----------
-let ctype = "";
+let ctype = "", cquery = "";
 $("#ctype").onclick = (e) => {
   if (e.target.dataset.t === undefined) return;
   ctype = e.target.dataset.t;
   document.querySelectorAll("#ctype button").forEach((b) => b.classList.toggle("on", b.dataset.t === ctype));
-  loadContacts();
+  renderContactList();
 };
+$("#contact-search").addEventListener("input", debounce(() => {
+  cquery = $("#contact-search").value.trim().toLowerCase(); renderContactList();
+}, 120));
+
+// Filter (type / ★ favourites) + search by name or key, over the contacts we already have.
+function renderContactList() {
+  const q = cquery;
+  const list = S.contacts.filter((c) => (!ctype || (ctype === "fav" ? c.favourite : String(c.type) === ctype))
+      && (!q || c.name.toLowerCase().includes(q) || c.public_key.startsWith(q)))
+    .sort((a, b) => (b.favourite - a.favourite) || (b.last_advert || 0) - (a.last_advert || 0) || a.name.localeCompare(b.name));
+  $("#contact-list").innerHTML = list.map((c) => `<a href="#/contact/${c.public_key}"${S.route[0] === "contact" && S.route[1] === c.public_key ? ` aria-current="true"` : ""}>
+    ${c.favourite ? `<span class="badge fav">★${presenceDot(c)}</span>` : `<span class="badge tint"${tint(c.name)}>${esc(initial(c.name))}${presenceDot(c)}</span>`}
+    <span class="meta"><div class="name">${esc(c.name)} <span class="tag">${TYPES[c.type] || c.type}</span></div>
+    <div class="last">${routeText(c)}</div></span>
+    <span class="when">${presence(c) ? ago(c.heard[0] * 1000) : c.last_advert ? ago(c.last_advert * 1000) : ""}</span></a>`).join("")
+    || `<p class="empty">${q ? `No contacts match "${esc(q)}".`
+      : ctype === "fav" ? "No favourites yet. Open a contact and tap ☆ Favourite to keep it here (favourites are never auto-removed)."
+      : ctype ? "None of this type." : "No contacts yet. People you hear appear under Nearby."}</p>`;
+}
 
 let nearbyHours = 1;
 $("#nearby-range").onclick = (e) => {
@@ -1180,17 +1420,10 @@ async function loadContacts() {
   S.contacts = contacts;
   const max = S.state?.device?.max_contacts;
   $("#contact-count").textContent = `${contacts.length}${max ? " / " + max : ""}`;
-  const list = contacts.filter((c) => !ctype || String(c.type) === ctype)
-    .sort((a, b) => (b.favourite - a.favourite) || (b.last_advert || 0) - (a.last_advert || 0) || a.name.localeCompare(b.name));
-  $("#contact-list").innerHTML = list.map((c) => `<a href="#/contact/${c.public_key}"${S.route[0] === "contact" && S.route[1] === c.public_key ? ` aria-current="true"` : ""}>
-    <span class="badge${c.favourite ? " fav" : ""}">${c.favourite ? "★" : esc(initial(c.name))}${presenceDot(c)}</span>
-    <span class="meta"><div class="name">${esc(c.name)} <span class="tag">${TYPES[c.type] || c.type}</span></div>
-    <div class="last">${routeText(c)}</div></span>
-    <span class="when">${presence(c) ? ago(c.heard[0] * 1000) : c.last_advert ? ago(c.last_advert * 1000) : ""}</span></a>`).join("")
-    || `<p class="empty">${ctype ? "None of this type." : "No contacts yet. People you hear appear under Nearby."}</p>`;
+  renderContactList();
 
   $("#nearby").innerHTML = near.map((n) => `<label>
-    <span class="badge">${esc(initial(n.name || n.pubkey))}</span>
+    <span class="badge tint"${tint(n.name || n.pubkey)}>${esc(initial(n.name || n.pubkey))}</span>
     <span class="meta"><div class="name">${esc(n.name || n.pubkey.slice(0, 8))} <span class="tag">${TYPES[n.type] || ""}</span> ${hashBadge(n.hash_size)} ${callChip(n.name)}</div>
     <div class="last"><span class="chip ${qClass(n.snr)}">${n.snr ?? "?"} dB</span> <span class="chip chip-hops">${hopsText(n.path_len)}</span>
       ${n.last_hop && n.last_hop !== "direct" ? "via " + esc(n.last_hop) : ""} · heard ${n.count}×</div></span>
@@ -1199,7 +1432,7 @@ async function loadContacts() {
   $("#nearby-note").textContent = near.length ? `${near.length}` : "";
 
   $("#pending-wrap").hidden = !pending.length;
-  $("#pending").innerHTML = pending.map((p) => `<label><span class="badge">${esc(initial(p.name))}</span>
+  $("#pending").innerHTML = pending.map((p) => `<label><span class="badge tint"${tint(p.name)}>${esc(initial(p.name))}</span>
     <span class="meta"><div class="name">${esc(p.name)}</div><div class="last">${TYPES[p.type] || ""}</div></span>
     <button class="btn sm primary" data-add="${p.public_key}">Add</button></label>`).join("");
 
@@ -1585,7 +1818,7 @@ async function openContact(key) {
   }
   $("#title").textContent = c.name;
   const isChat = c.type === 1, isNode = c.type === 2 || c.type === 3 || c.type === 4;
-  $("#c-hero").innerHTML = `<span class="badge big${c.favourite ? " fav" : ""}">${c.favourite ? "★" : esc(initial(c.name))}</span>
+  $("#c-hero").innerHTML = `${c.favourite ? `<span class="badge big fav">★</span>` : `<span class="badge big tint"${tint(c.name)}>${esc(initial(c.name))}</span>`}
     <div><div class="hero-name">${esc(c.name)}</div>
     <div class="hero-sub"><span class="tag">${TYPES[c.type] || c.type}</span> ${hashBadge(c.hash_size)} ${callChip(c.name)}
       <span>${c.path_len < 0 ? "No fixed route — messages flood" : c.path_len === 0 ? "Direct — no repeaters" : `Route: ${c.path_len} hop${c.path_len === 1 ? "" : "s"}`}</span></div></div>`;
@@ -1838,7 +2071,7 @@ function renderSpots() {
 
 // ---------- map ----------
 // Plots your contacts plus every node heard advertising with a location
-// (repeaters live there now that auto-manage keeps them out of contacts).
+// (including repeaters you've heard but never saved as contacts).
 let map, layer, legend, trails, links, mapNodes = [];
 async function showMap() {
   const my = nav;
@@ -1920,7 +2153,7 @@ async function drawLinks() {
   const at = new Map(t.nodes.map((n) => [n.key, n]));
   if (t.me) at.set("me", { ...t.me, name: "You" });
   const r = L.canvas({ padding: .3 });
-  const grade = { "q-good": css("--ok"), "q-ok": css("--warn"), "q-bad": css("--accent") };
+  const grade = { "q-good": css("--ok"), "q-ok": css("--warn"), "q-bad": css("--bad") };
   for (const e of t.edges) {
     const a = at.get(e.a), b = at.get(e.b); if (!a || !b) continue;
     const mine = e.a === "me" || e.b === "me";
@@ -2019,7 +2252,6 @@ function fillSettings() {
   pinLabel.hidden = usb;
   if (pinLabel.nextElementSibling?.classList.contains("hint")) pinLabel.nextElementSibling.hidden = usb;
   f.auto_manage.checked = s.auto_manage !== false;
-  f.people_cap.value = s.people_cap ?? "";
   f.ble_pin.value = "";
   f.ble_pin.placeholder = s.device?.ble_pin ? `currently fixed (${s.device.ble_pin})` : "currently random each boot";
   loadRadioSettings();
@@ -2059,7 +2291,6 @@ $("#settings").onsubmit = async (e) => {
   if (f.lat.value && f.lon.value && (+f.lat.value !== S.state.lat || +f.lon.value !== S.state.lon)) { body.lat = +f.lat.value; body.lon = +f.lon.value; }
   if (f.manual_add_contacts.checked !== !!S.state.manual_add_contacts) body.manual_add_contacts = f.manual_add_contacts.checked;
   if (f.auto_manage.checked !== (S.state.auto_manage !== false)) body.auto_manage = f.auto_manage.checked;
-  if (f.people_cap.value && +f.people_cap.value !== S.state.people_cap) body.people_cap = +f.people_cap.value;
   if (f.ble_pin.value) body.ble_pin = +f.ble_pin.value;
   const r = S.rs;
   if (r) {
@@ -2109,22 +2340,42 @@ new ResizeObserver(([e]) => document.documentElement.style.setProperty("--compos
   .observe($("#composer"));
 
 // ---------- theme ----------
+// Mode (System/Light/Dark) and colour theme are separate: every theme has a
+// light and a dark set in style.css. Swatches: light bg, accent, link, dark bg, dark accent.
+const PALETTES = [
+  { id: "", name: "Kanagawa", sw: ["#fbfaf7", "#c84053", "#4d699b", "#16161d", "#e46876"] },
+  { id: "nord", name: "Nord", sw: ["#eceff4", "#5e81ac", "#4a6c94", "#2e3440", "#88c0d0"] },
+  { id: "gruvbox", name: "Gruvbox", sw: ["#fbf1c7", "#af3a03", "#076678", "#282828", "#fe8019"] },
+  { id: "solarized", name: "Solarized", sw: ["#fdf6e3", "#268bd2", "#6c71c4", "#002b36", "#2aa198"] },
+  { id: "contrast", name: "High contrast", sw: ["#ffffff", "#0040dd", "#000000", "#000000", "#ffd400"] },
+];
 const darkMq = matchMedia("(prefers-color-scheme: dark)");
-let themePref = (() => { try { return localStorage.getItem("theme") || "system"; } catch { return "system"; } })();
-function applyTheme(t) {
-  themePref = t;
-  if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
-  else delete document.documentElement.dataset.theme;
-  try { t === "system" ? localStorage.removeItem("theme") : localStorage.setItem("theme", t); } catch { /* private mode */ }
+const stored = (k, d) => { try { return localStorage.getItem(k) || d; } catch { return d; } };
+let themePref = stored("theme", "system"), palettePref = stored("palette", "");
+$("#palettes").innerHTML = PALETTES.map((p) => `<button type="button" data-palette="${p.id}" aria-pressed="false">
+  <span class="sw">${p.sw.map((c) => `<i style="background:${c}"></i>`).join("")}</span>${p.name}</button>`).join("");
+function applyTheme(t = themePref, pal = palettePref) {
+  themePref = t; palettePref = pal;
+  const root = document.documentElement;
+  if (t === "light" || t === "dark") root.dataset.theme = t; else delete root.dataset.theme;
+  if (pal) root.dataset.palette = pal; else delete root.dataset.palette;
+  try {
+    t === "system" ? localStorage.removeItem("theme") : localStorage.setItem("theme", t);
+    pal ? localStorage.setItem("palette", pal) : localStorage.removeItem("palette");
+  } catch { /* private mode */ }
   document.querySelectorAll("#theme button").forEach((b) => b.classList.toggle("on", b.dataset.theme === t));
-  const dark = t === "dark" || (t === "system" && darkMq.matches);
-  document.querySelectorAll('meta[name="theme-color"]').forEach((m) => m.setAttribute("content", dark ? "#16161d" : "#fbfaf7"));
+  document.querySelectorAll("#palettes button").forEach((b) => {
+    const on = b.dataset.palette === pal; b.classList.toggle("on", on); b.setAttribute("aria-pressed", on);
+  });
+  const bg = css("--bg");
+  document.querySelectorAll('meta[name="theme-color"]').forEach((m) => m.setAttribute("content", bg));
   if (["signal", "radio"].includes(S.route[0])) loadStats();   // charts take their colours at draw time
   if (S.route[0] === "map" && map) showMap();
 }
 $("#theme").onclick = (e) => { const t = e.target.dataset.theme; if (t) applyTheme(t); };
-darkMq.addEventListener?.("change", () => { if (themePref === "system") applyTheme("system"); });
-applyTheme(themePref);
+$("#palettes").onclick = (e) => { const b = e.target.closest("[data-palette]"); if (b) applyTheme(themePref, b.dataset.palette); };
+darkMq.addEventListener?.("change", () => { if (themePref === "system") applyTheme(); });
+applyTheme();
 
 // Charts are drawn at a fixed width: follow rotation / window resizes.
 window.addEventListener("resize", debounce(() => {
