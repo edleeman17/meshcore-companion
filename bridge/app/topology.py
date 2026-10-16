@@ -19,6 +19,35 @@ def km(a: tuple, b: tuple) -> float:
     return math.hypot(x, y) * 6371
 
 
+class Resolver:
+    """Hop prefix -> located node, nearest to the previous point on the chain."""
+    def __init__(self, heard: list[dict]):
+        self.by_prefix: dict[str, list[dict]] = {}
+        for h in heard:
+            if h.get("lat") or h.get("lon"):
+                for size in (1, 2):
+                    self.by_prefix.setdefault(h["pubkey"][:2 * size], []).append(h)
+
+    def resolve(self, prefix: str, near: tuple | None):
+        cands = self.by_prefix.get(prefix, [])
+        pool = [c for c in cands if c.get("type") in (2, 3)] or cands
+        if not pool:
+            return None
+        if near is None:
+            return pool[0] if len(pool) == 1 else None
+        best = min(pool, key=lambda c: km(near, (c["lat"], c["lon"])))
+        return best if km(near, (best["lat"], best["lon"])) <= MAX_HOP_KM else None
+
+    def chain(self, hops: list[str], start: tuple | None) -> list[dict | None]:
+        """Resolve hops in order, each nearest the one before (start = our location)."""
+        out, near = [], start
+        for h in hops:
+            r = self.resolve(h, near)
+            out.append(r)
+            near = (r["lat"], r["lon"]) if r else None
+        return out
+
+
 def build(packets: list[dict], heard: list[dict], me: tuple | None, top: int = 600) -> dict:
     located = [h for h in heard if h.get("lat") or h.get("lon")]
     by_prefix: dict[str, list[dict]] = {}

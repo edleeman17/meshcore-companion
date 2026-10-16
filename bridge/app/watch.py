@@ -34,6 +34,11 @@ class Watch:
         self.radio, self.db, self.hub = radio, db, hub
         self.started = time.time()
         self.seen: dict[str, float] = db.get_setting("fav_seen", {}) or {}
+        # every contact's last sign of life, for the "last heard" dots: {pubkey: [epoch s, how]}
+        self.last: dict[str, list] = db.get_setting("last_heard", {}) or {}
+        for pk, ts in db.last_heard_seed().items():   # adverts + DMs already stored
+            if ts / 1000 > (self.last.get(pk) or [0])[0]:
+                self.last[pk] = [ts / 1000, "heard earlier"]
         self._dirty = False
         self.offline_alerted = False
 
@@ -45,8 +50,15 @@ class Watch:
 
     async def heard(self, *, key: str | None = None, name: str | None = None, hop: str | None = None,
                     how: str = "", snr=None):
-        """Something from a favourite reached us. Match by full key, by name
-        (channel posts carry only a name) or by 1-byte hop (a repeater relaying)."""
+        """Something from a contact reached us. Match by full key, by name
+        (channel posts carry only a name) or by 1-byte hop (a repeater relaying).
+        Every contact's last-heard time is kept; favourites also get back-in-range alerts."""
+        mc = self.radio.mc
+        for pk, c in (mc.contacts.items() if mc else []):
+            if (key and pk.startswith(key)) or (name and (c.get("adv_name") or "") == name) \
+                    or (hop and c.get("type") == 2 and pk.startswith(hop)):
+                self.last[pk] = [time.time(), how]
+                self._dirty = True
         for c in self._fav_contacts():
             pk = c["public_key"]
             if key and not pk.startswith(key):
@@ -76,6 +88,7 @@ class Watch:
     def flush(self):
         if self._dirty:
             self.db.set_setting("fav_seen", self.seen)
+            self.db.set_setting("last_heard", self.last)
             self._dirty = False
 
     # ---------- our own radio going offline ----------

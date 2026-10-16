@@ -527,3 +527,11 @@ a.btn { text-decoration: none; display: inline-flex; align-items: center; justif
 .menu a:active { background: var(--surface-2); }
 .subpage > :first-child { margin-top: 1rem; }
 .range-slot .seg { margin-top: 0; margin-bottom: .6rem; }
+
+/* ---- last heard ("online") dots ---- */
+.badge { position: relative; }
+.pdot { position: absolute; right: -2px; bottom: -2px; width: .7rem; height: .7rem; border: 2px solid var(--bg); background: var(--faint); }
+.pdot.p-on { background: var(--ok); } .pdot.p-recent { background: var(--warn); }
+#title .presence { font-size: .72rem; font-weight: 500; color: var(--muted); white-space: nowrap; }
+#title .presence::before { content: ""; display: inline-block; width: .5rem; height: .5rem; margin-right: .3rem; background: var(--faint); vertical-align: .05em; }
+#title .presence.p-on::before { background: var(--ok); } #title .presence.p-recent::before { background: var(--warn); }

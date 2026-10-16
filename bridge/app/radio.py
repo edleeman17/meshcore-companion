@@ -12,7 +12,7 @@ from collections import deque
 
 from meshcore import EventType, MeshCore
 
-from . import discover, filters, inspect, signing
+from . import discover, filters, inspect, signing, topology
 from .db import DB, now_ms
 
 log = logging.getLogger("radio")
@@ -23,12 +23,16 @@ MAX_CHANNELS = 8
 PEOPLE_CAP = 200          # keep at most this many non-favourite people; rotate oldest out
 AUTO_ADD_PER_CYCLE = 6    # cap work per poll so we never block the BLE link for long
 AUTO_REMOVE_PER_CYCLE = 12
+WIFI_PER_CYCLE = 50       # TCP has bandwidth to spare: no need to ration
+WIFI_CONTACTS_SECS = 60
 
 
 class Radio:
-    def __init__(self, address: str, db: DB, hub, pin: str | None = None, serial: str = "", baud: int = 115200):
+    def __init__(self, address: str, db: DB, hub, pin: str | None = None, serial: str = "", baud: int = 115200,
+                 host: str = ""):
         self.address, self.pin, self.db, self.hub = address, pin, db, hub
         self.serial, self.baud = serial, baud     # USB: serial port path; empty = Bluetooth
+        self.host = host                          # WiFi: "ip[:port]" of a v1.18+ companion (port 5000)
         self.mc: MeshCore | None = None
         self.connected = False
         self.changed_at = time.time()     # last connect/disconnect
@@ -68,7 +72,7 @@ class Radio:
         si = self.mc.self_info if self.mc else {}
         return {
             "connected": self.connected,
-            "link": "usb" if self.serial else "bluetooth",
+            "link": "wifi" if self.host else "usb" if self.serial else "bluetooth",
             "since": int(self.changed_at * 1000),
             "reconnects": self.reconnects,
             "clock_drift": self.clock_drift,
@@ -103,8 +107,13 @@ class Radio:
             "name": c.get("adv_name") or c["public_key"][:8],
             "type": c.get("type"),                 # 1 chat, 2 repeater, 3 room, 4 sensor
             "path_len": c.get("out_path_len", -1),  # -1 = flood (no learned route)
+            # the saved route itself, as names (our side -> them). Inbound DMs on a saved
+            # route arrive with an empty path, so this reversed is our best guess at theirs.
+            "route": self._route_names(self._split_path(c.get("out_path") or "",
+                                                        max(0, c.get("out_path_hash_mode") or 0) + 1)),
             "last_advert": c.get("last_advert"),
             "favourite": c["public_key"] in favs,
+            "heard": (self.watch.last.get(c["public_key"]) if self.watch else None),   # [epoch s, how]
             "hash_size": hsz.get(c["public_key"]),  # 1 = classic, 2 = 2-byte MeshCore (None = unknown)
             "lat": c.get("adv_lat"), "lon": c.get("adv_lon"),
         } for c in self.mc.contacts.values()]
@@ -273,6 +282,28 @@ class Radio:
                 f["note"] = f"{sig['signer']} · " + f["note"]
         return out
 
+    def _route_names(self, hops: list[str]) -> list[str]:
+        """Our saved route as names, matched geographically outward from us: a 1-byte
+        hop matches several repeaters, so pick the one nearest the previous hop."""
+        if not hops:
+            return []
+        if not getattr(self, "_resolver", None) or time.time() - self._resolver[0] > 300:
+            self._resolver = (time.time(), topology.Resolver(self.db.heard(now_ms() - 30 * 86400_000)))
+        si = (self.mc.self_info or {}) if self.mc else {}
+        me = (si["adv_lat"], si["adv_lon"]) if si.get("adv_lat") or si.get("adv_lon") else None
+        names = []
+        for h, r in zip(hops, self._resolver[1].chain(hops, me)):
+            if r:
+                names.append(r.get("name") or h)
+            else:   # not placeable: fall back to the plain name guess, marked uncertain
+                n = self.hop_name(h) or h
+                names.append(n if n.endswith("?") else n + "?")
+        return names
+
+    @staticmethod
+    def _split_path(path: str, size: int = 1) -> list[str]:
+        return [path[i:i + 2 * size] for i in range(0, len(path), 2 * size)]
+
     def path_names(self, path: str, size: int = 1) -> str:
         if not path:
             return ""
@@ -330,7 +361,15 @@ class Radio:
 
     async def _session(self):
         self._gone.clear()
-        if self.serial:
+        if self.host:
+            h, _, port = self.host.partition(":")
+            try:
+                self.mc = await MeshCore.create_tcp(h, int(port or 5000))
+            except (asyncio.TimeoutError, TimeoutError, OSError):
+                self.mc = None
+            if self.mc is None:
+                raise RuntimeError(f"no answer from {self.host} over WiFi: is the radio on and joined to the network?")
+        elif self.serial:
             if not os.path.exists(self.serial):
                 raise RuntimeError(f"{self.serial} not found: is the radio plugged in by USB?")
             try:
@@ -360,7 +399,7 @@ class Radio:
         def on_gone(e):
             if mc is not self.mc:
                 return
-            log.warning("%s disconnected: %s", "USB" if self.serial else "BLE", e.payload)
+            log.warning("%s disconnected: %s", "WiFi" if self.host else "USB" if self.serial else "BLE", e.payload)
             self._gone.set()
         mc.subscribe(EventType.DISCONNECTED, on_gone)
         mc.subscribe(EventType.CONTACT_MSG_RECV, live(self._on_dm))
@@ -477,7 +516,7 @@ class Radio:
                         if ev.type != EventType.ERROR:
                             sample[key] = {k: v for k, v in ev.payload.items()
                                            if isinstance(v, (int, float, str, type(None)))}
-                    if not self.contacts_ok or time.time() - last_contacts > CONTACTS_SECS:
+                    if not self.contacts_ok or time.time() - last_contacts > (WIFI_CONTACTS_SECS if self.host else CONTACTS_SECS):
                         await self.mc.commands.get_contacts()
                         last_contacts = time.time()
                 await self._auto_manage_contacts()
@@ -507,7 +546,7 @@ class Radio:
 
         # 1. auto-add heard people + rooms (skip repeaters type 2 / sensors type 4)
         for pk, c in list(self.mc.pending_contacts.items()):
-            if added >= AUTO_ADD_PER_CYCLE:
+            if added >= (WIFI_PER_CYCLE if self.host else AUTO_ADD_PER_CYCLE):
                 break
             if c.get("type") in (1, 3):
                 try:
@@ -519,7 +558,7 @@ class Radio:
 
         # 2. purge repeaters/sensors that slipped into the table
         for pk, c in list(self.mc.contacts.items()):
-            if removed >= AUTO_REMOVE_PER_CYCLE:
+            if removed >= (WIFI_PER_CYCLE if self.host else AUTO_REMOVE_PER_CYCLE):
                 break
             if c.get("type") in (2, 4) and pk not in favs:
                 try:
@@ -538,7 +577,7 @@ class Radio:
             people.sort(key=lambda c: max(recency.get(c["public_key"][:12], 0),
                                           (c.get("last_advert") or 0) * 1000))
             for c in people[:len(people) - cap]:
-                if removed >= AUTO_REMOVE_PER_CYCLE:
+                if removed >= (WIFI_PER_CYCLE if self.host else AUTO_REMOVE_PER_CYCLE):
                     break
                 try:
                     await self.command("remove_contact", c["public_key"])
@@ -776,6 +815,8 @@ class Radio:
             res = await self.mc.commands.send_msg_with_retry(
                 public_key, text, max_attempts=4, flood_after=2, max_flood_attempts=3)
             status = "delivered" if res else "failed"
+            if res and self.watch:   # a delivery receipt proves their radio is on
+                await self.watch.heard(key=public_key, how="received your message")
         except Exception as e:  # noqa: BLE001
             log.warning("send failed: %s", e)
         m = self.db.update_message(mid, status=status,

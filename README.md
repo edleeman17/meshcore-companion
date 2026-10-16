@@ -32,13 +32,19 @@ A self-hosted web app for your [MeshCore](https://meshcore.io) LoRa radio. A sma
 
 ## Features
 
-**New: 🔎 Packet inspector** — Signal → Live packets: tap any packet to see its raw bytes as a colour-coded hex dump, with every field named and explained (header, route, each hop by repeater name, advert key/location/name, ACKs, trace SNRs). Channel traffic is **decrypted** with every key the app knows (your channels, Public, discovered `#hashtags`), and signature packets are split into key id, signed time and signature. Filter by type, pause the log, copy the hex, or **Show route on map**. Raw packets are kept for 7 days.
+**New: 📶 WiFi radio link** — companion firmware v1.18's normal BLE build also speaks WiFi. Set `RADIO_HOST` and the bridge connects over your network instead of Bluetooth (no more BLE drop-outs), while your phone can still use Bluetooth. Set the radio's WiFi from the bridge with `POST /api/radio/cli` (`set wifi.ssid …`, `set wifi.pwd …`, `reboot`), which runs any companion CLI command on your own radio.
 
-**New: 🗺️ Live packet trails and mesh links** — on the Map, each packet you receive is replayed as a dot travelling sender → repeaters → you. Tick **Links heard (24 h)** to draw the repeater-to-repeater network built from every path you've heard: thicker lines carry more traffic, and your own links are coloured by SNR. Hop IDs are 1–2 byte key prefixes, so each is matched to the located node nearest the next hop (repeaters preferred).
+**New: 🟢 Last heard** — a dot on every person in Chats and Contacts, and "heard 5m ago" in the DM header: green under 15 minutes, amber under 2 hours. MeshCore has no presence, so it's the last sign of life the bridge saw (an advert, a DM, a channel post, a delivery receipt or a repeater relaying) — their radio, not whether they're reading.
 
-**New: ✍️ Signed filter** — Live packets can show only signed traffic: signature packets and every heard copy of the post they sign, marked with who signed.
+**New: likely route on saved-route DMs** — a DM sent down a saved route arrives with no hop list (each repeater removes itself as it forwards). The chip, journey diagram and details now show your saved route to them, reversed, as the likely path, with each 1-byte hop matched to the nearest repeater along the chain.
 
-**New: menus for Signal and Radio** — both open on a short menu (Charts, Who you hear, Live packets… / Settings, Notifications, Spam filters…), each feature on its own page.
+**🔎 Packet inspector** — Signal → Live packets: tap any packet to see its raw bytes as a colour-coded hex dump, with every field named and explained (header, route, each hop by repeater name, advert key/location/name, ACKs, trace SNRs). Channel traffic is **decrypted** with every key the app knows (your channels, Public, discovered `#hashtags`), and signature packets are split into key id, signed time and signature. Filter by type, pause the log, copy the hex, or **Show route on map**. Raw packets are kept for 7 days.
+
+**🗺️ Live packet trails and mesh links** — on the Map, each packet you receive is replayed as a dot travelling sender → repeaters → you. Tick **Links heard (24 h)** to draw the repeater-to-repeater network built from every path you've heard: thicker lines carry more traffic, and your own links are coloured by SNR. Hop IDs are 1–2 byte key prefixes, so each is matched to the located node nearest the next hop (repeaters preferred).
+
+**✍️ Signed filter** — Live packets can show only signed traffic: signature packets and every heard copy of the post they sign, marked with who signed.
+
+**menus for Signal and Radio** — both open on a short menu (Charts, Who you hear, Live packets… / Settings, Notifications, Spam filters…), each feature on its own page.
 
 **🖥️ Desktop layout** — on a laptop or desktop browser (1024 px and wider) the app gets a sidebar instead of bottom tabs, Chats and Contacts open beside their list instead of on a new page, and charts sit in two columns. `Esc` closes the open chat, `/` jumps to search. Phones and tablets are unchanged.
 
@@ -278,7 +284,7 @@ If you keep the repo on a workstation and push to the Pi over SSH (handy when de
 
 ```sh
 cp examples/deploy.env.example deploy.env
-nano deploy.env            # HOST = ssh name of the Pi; RADIO_SERIAL (USB port) or RADIO_ADDRESS (Bluetooth)
+nano deploy.env            # HOST = ssh name of the Pi; RADIO_HOST (WiFi), RADIO_SERIAL (USB port) or RADIO_ADDRESS (Bluetooth)
 ./bridge/deploy.sh         # installs/updates the bridge and the web app it serves
 ```
 For Bluetooth, pair first on the Pi with `./bridge/pair.sh AA:BB:CC:DD:EE:FF 123456`. For USB, add yourself to the `dialout` group on the Pi. If you host the front end elsewhere, `PWA_DEST=server:/path ./pwa/deploy.sh` copies the static files there.
@@ -312,6 +318,7 @@ Bridge environment (`~/.config/meshcore-bridge.env`, see `bridge/meshcore-bridge
 
 | Variable | Purpose |
 |---|---|
+| `RADIO_HOST` | **WiFi:** the radio's IP (optionally `ip:port`, default port 5000). Needs companion firmware **v1.18+**: flash the normal BLE build, then set the network with `POST /api/radio/cli` (`set wifi.ssid …`, `set wifi.pwd …`, `reboot`). BLE keeps working alongside. Takes priority over the others. Port 5000 has no authentication, so give the radio a fixed IP and keep it on a trusted network. |
 | `RADIO_SERIAL` | **USB:** the radio's serial port, e.g. `/dev/serial/by-id/usb-…` or `/dev/ttyACM0` (USB companion firmware). Takes priority over `RADIO_ADDRESS`. Your user needs to be in the `dialout` group. |
 | `RADIO_BAUD` | USB speed. Default `115200`. |
 | `RADIO_ADDRESS` | **Bluetooth:** BLE MAC of the radio (BLE companion firmware). Set this or `RADIO_SERIAL`. |

@@ -173,13 +173,32 @@ document.addEventListener("keydown", (e) => {
 const contactName = (prefix) => S.contacts.find((c) => c.prefix === prefix)?.name || prefix.slice(0, 8);
 const chanName = (idx) => S.state?.channels?.[idx] || (idx === "0" ? "Public" : `Channel ${idx}`);
 
+// "Last heard": MeshCore has no presence, so this is the latest sign of life the
+// bridge saw — an advert, a DM, a channel post or a delivery receipt.
+function presence(c) {
+  const ts = c?.heard?.[0] ? c.heard[0] * 1000 : 0;
+  if (!ts) return null;
+  const age = Date.now() - ts;
+  return { cls: age < 15 * 60e3 ? "p-on" : age < 2 * 3600e3 ? "p-recent" : "p-off",
+    text: `heard ${age < 60e3 ? "just now" : ago(ts) + " ago"}`, how: c.heard[1] || "" };
+}
+const presenceDot = (c) => { const p = presence(c); return p ? `<i class="pdot ${p.cls}" title="${esc(p.text + (p.how ? " · " + p.how : ""))}"></i>` : ""; };
+const contactByPrefix = (prefix) => S.contacts.find((c) => c.prefix === prefix);
+
+// A DM on a saved (direct) route arrives with an empty path: each repeater strips
+// itself as it forwards. Our own saved route to them, reversed, is the best guess.
+const likelyRoute = (m) => {
+  const r = m.kind === "dm" && m.direction === "in" && m.path_len == null && contactByPrefix(m.peer)?.route;
+  return r?.length ? [...r].reverse() : null;
+};
+
 const routeText = (c) => c.path_len < 0 ? "no fixed route" : c.path_len === 0 ? "direct" : `${c.path_len} hop${c.path_len === 1 ? "" : "s"}`;
 const convRow = (c) => {
   const name = c.kind === "chan" ? chanName(c.peer) : c.name || contactName(c.peer);
   const unread = c.unread ? ` unread` : "";
   const cur = S.route[0] === c.kind && S.route[1] === c.peer ? ` aria-current="true"` : "";
   return `<a href="#/${c.kind}/${esc(c.peer)}" class="${unread}"${cur}>
-    <span class="badge${c.kind === "chan" ? " chan" : ""}">${c.kind === "chan" ? "#" : esc(initial(name))}</span>
+    <span class="badge${c.kind === "chan" ? " chan" : ""}">${c.kind === "chan" ? "#" : esc(initial(name)) + presenceDot(contactByPrefix(c.peer))}</span>
     <span class="meta"><div class="name">${esc(name)}</div><div class="last">${esc(c.last_text) || "&nbsp;"}</div></span>
     <span class="when">${c.last_ts ? ago(c.last_ts) : ""}${c.mentions || c.unread ? `<span class="marks">${c.mentions ? '<span class="at" title="You were mentioned">@</span>' : ""}${c.unread ? `<span class="count-badge">${c.unread}</span>` : ""}</span>` : ""}</span></a>`;
 };
@@ -278,6 +297,8 @@ async function openThread(kind, peer) {
   $("#v-thread").hidden = false;
   showSignToggle();
   $("#title").textContent = kind === "chan" ? chanName(peer) : contactName(peer);
+  const pr = kind === "dm" && presence(contactByPrefix(peer));
+  if (pr) $("#title").insertAdjacentHTML("beforeend", ` <small class="presence ${pr.cls}" title="${esc(pr.how)}">${esc(pr.text)}</small>`);
   if (!S.thread.length || S.thread[0]?.peer !== peer) $("#msgs").innerHTML = `<p class="empty">Loading…</p>`;
   let last = 0;
   try { last = (await api(`/read/${kind}/${encodeURIComponent(peer)}`)).last_read || 0; } catch { /* offline */ }
@@ -347,7 +368,8 @@ function msgHtml(m) {
   const warn = m.warn ? `<span class="chip q-bad" title="${esc(m.warn)}">⚠ unusual route</span>` : "";
   const hops = m.direction === "in"
     ? (m.path_len != null ? `<span class="chip chip-hops">${hopsText(m.path_len)}</span>`
-      : (m.kind === "dm" ? `<span class="chip chip-hops" title="Arrived on an established direct route — no flood path to count">via saved route</span>` : ""))
+      : (m.kind === "dm" ? (() => { const lr = likelyRoute(m);
+          return `<span class="chip chip-hops" title="${lr ? `Likely via ${esc(lr.join(" → "))} (your saved route to them, reversed)` : "Arrived on an established direct route — no flood path to count"}">via saved route${lr ? ` · ${hopsText(lr.length)}` : ""}</span>`; })() : ""))
     : "";
   const rtt = m.rtt_ms ? `<span>${(m.rtt_ms / 1000).toFixed(1)}s</span>` : "";
   const dmEcho = m.direction === "out" && m.kind === "dm" && m.status !== "delivered" && m.echoes != null
@@ -419,7 +441,13 @@ function journeyHtml(m) {
     return `<div class="journey">${jrNode("📱", "You")}${jrLeg(l1, e ? `↺ ×${e}` : (sending ? "sending…" : "✗ no repeat"))}${jrNode("📡", "mesh")}</div><p class="jr-say">${say}</p>`;
   }
   const snr = m.snr, q = snrGrade(snr).leg;
+  const lr = likelyRoute(m);
   const leglbl = (m.path_len != null ? hopsText(m.path_len) : (m.kind === "dm" ? "saved route" : "heard")) + (snr != null ? ` · ${snr} dB` : "");
+  if (lr) {   // their side first: them → likely repeaters → you
+    const say = `Came down a saved route, so the packet carries no hop list (each repeater removes itself as it forwards). ` +
+      `Your saved route to them, reversed, is the likely path.${snr != null ? ` You heard the last hop at SNR ${snr} dB (${qWord(snr)}).` : ""}`;
+    return `<div class="journey">${jrNode("👤", esc(m.sender || contactName(m.peer)))}${jrLeg("wait", "likely")}${(lr.length > 3 ? [lr[0], `+${lr.length - 2} more`, lr.at(-1)] : lr).map((n) => jrNode("📡", esc(n))).join(jrLeg("wait", ""))}${jrLeg(q, snr != null ? `${snr} dB` : "")}${jrNode("📱", "You")}</div><p class="jr-say">${say}</p>`;
+  }
   const say = snr == null ? "Received." :
     `You heard this at SNR ${snr} dB (${qWord(snr)})${m.path_len ? ", over " + hopsText(m.path_len) : ""}. That's how well you hear them — not how well they hear you.`;
   return `<div class="journey">${jrNode("👤", esc(m.sender || contactName(m.peer)))}${jrLeg(q, leglbl)}${jrNode("📱", "You")}</div><p class="jr-say">${say}</p>`;
@@ -474,7 +502,8 @@ function msgDetails(m) {
     "Sender's clock": m.sender_ts ? `${new Date(m.sender_ts * 1000).toLocaleTimeString()} (${Math.round(m.ts / 1000 - m.sender_ts)}s before arrival)` : null,
     Signal: m.snr != null ? `SNR ${m.snr} dB (${qWord(m.snr)})${m.rssi != null ? ` · RSSI ${m.rssi} dBm` : ""}` : null,
     Hops: m.direction === "in" ? (m.path_len != null ? hopsText(m.path_len)
-      : (m.kind === "dm" ? "via saved route (sent down an established path, so no hop list)" : null)) : null,
+      : (m.kind === "dm" ? (likelyRoute(m) ? `via saved route · likely ${likelyRoute(m).join(" → ")} (your route to them, reversed; the packet itself carries no hop list)`
+        : "via saved route (sent down an established path, so no hop list)") : null)) : null,
     "⚠ Warning": m.warn || null,
     Signed: !m.signed ? null
       : m.signed_ok === 0 ? `🔏✗ carries a signature that does not check out — ignore it`
@@ -911,7 +940,7 @@ function renderRadio() {
   const air = L.core?.uptime_secs ? (((L.radio?.tx_air_secs || 0) / L.core.uptime_secs) * 100).toFixed(2) + "%" : "–";
   const g = L.radio ? snrGrade(L.radio.last_snr) : null;
   const tiles = [
-    ["Link", s.connected ? "Connected" : "Offline", s.connected ? `${s.link === "usb" ? "USB" : "Bluetooth"} · ${ago(s.since)}` : (s.last_error || `for ${ago(s.since)}`), s.connected ? "ok" : "bad"],
+    ["Link", s.connected ? "Connected" : "Offline", s.connected ? `${{ usb: "USB", wifi: "WiFi" }[s.link] || "Bluetooth"} · ${ago(s.since)}` : (s.last_error || `for ${ago(s.since)}`), s.connected ? "ok" : "bad"],
     ["Battery", v ? `${lipoPct(v)}%` : "–", v ? `${v.toFixed(2)} V` : "", v && lipoPct(v) < 20 ? "bad" : ""],
     ["Last signal", L.radio ? `${L.radio.last_snr} dB` : "–", g ? `${g.word} · ${L.radio.last_rssi} dBm` : "", g ? (g.cls === "q-bad" ? "bad" : "") : ""],
     ["Noise floor", L.radio ? `${L.radio.noise_floor} dBm` : "–", "lower is quieter", ""],
@@ -1154,10 +1183,10 @@ async function loadContacts() {
   const list = contacts.filter((c) => !ctype || String(c.type) === ctype)
     .sort((a, b) => (b.favourite - a.favourite) || (b.last_advert || 0) - (a.last_advert || 0) || a.name.localeCompare(b.name));
   $("#contact-list").innerHTML = list.map((c) => `<a href="#/contact/${c.public_key}"${S.route[0] === "contact" && S.route[1] === c.public_key ? ` aria-current="true"` : ""}>
-    <span class="badge${c.favourite ? " fav" : ""}">${c.favourite ? "★" : esc(initial(c.name))}</span>
+    <span class="badge${c.favourite ? " fav" : ""}">${c.favourite ? "★" : esc(initial(c.name))}${presenceDot(c)}</span>
     <span class="meta"><div class="name">${esc(c.name)} <span class="tag">${TYPES[c.type] || c.type}</span></div>
     <div class="last">${routeText(c)}</div></span>
-    <span class="when">${c.last_advert ? ago(c.last_advert * 1000) : ""}</span></a>`).join("")
+    <span class="when">${presence(c) ? ago(c.heard[0] * 1000) : c.last_advert ? ago(c.last_advert * 1000) : ""}</span></a>`).join("")
     || `<p class="empty">${ctype ? "None of this type." : "No contacts yet. People you hear appear under Nearby."}</p>`;
 
   $("#nearby").innerHTML = near.map((n) => `<label>

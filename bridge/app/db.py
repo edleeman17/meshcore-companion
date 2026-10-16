@@ -299,6 +299,15 @@ class DB:
         return self._rows("SELECT rowid AS id, ts, raw FROM packets WHERE ptype=? AND raw IS NOT NULL "
                           "AND ts>=? AND ts<=?", (ptype, since_ms, until_ms or now_ms()))
 
+    def last_heard_seed(self) -> dict[str, int]:
+        """pubkey -> latest ms we heard it advertise or DM us (seeds the last-heard dots)."""
+        out = {r["pubkey"]: r["last_ts"] for r in self._rows("SELECT pubkey, last_ts FROM heard")}
+        for r in self._rows("SELECT peer, MAX(ts) AS ts FROM messages WHERE kind='dm' AND direction='in' GROUP BY peer"):
+            for pk in out:
+                if pk.startswith(r["peer"]) and r["ts"] > out[pk]:
+                    out[pk] = r["ts"]
+        return out
+
     def mark_signed(self, ids: list[int], who: str):
         for i in ids:
             self._exec("UPDATE packets SET signed=? WHERE rowid=?", (who, i))

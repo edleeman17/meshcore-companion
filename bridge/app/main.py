@@ -28,6 +28,7 @@ log = logging.getLogger("bridge")
 
 # Connect over USB (RADIO_SERIAL=/dev/ttyACM0, USB companion firmware) or
 # Bluetooth (RADIO_ADDRESS=AA:BB:..., BLE companion firmware). USB wins if both set.
+RADIO_HOST = os.environ.get("RADIO_HOST", "").strip()       # WiFi companion: ip[:port]
 RADIO_SERIAL = os.environ.get("RADIO_SERIAL", "").strip()
 RADIO_BAUD = int(os.environ.get("RADIO_BAUD", "115200"))
 RADIO_ADDRESS = os.environ.get("RADIO_ADDRESS", "").strip()
@@ -49,7 +50,7 @@ _removed = db.dedupe_existing()
 if _removed:
     log.info("removed %d duplicate messages", _removed)
 hub = Hub(db, VAPID_PRIVATE, VAPID_SUBJECT)
-radio = Radio(RADIO_ADDRESS, db, hub, RADIO_PIN, serial=RADIO_SERIAL, baud=RADIO_BAUD)
+radio = Radio(RADIO_ADDRESS, db, hub, RADIO_PIN, serial=RADIO_SERIAL, baud=RADIO_BAUD, host=RADIO_HOST)
 watch = radio.watch = Watch(radio, db, hub)
 qrz = QRZ(db)
 
@@ -702,6 +703,15 @@ async def remote_telemetry(key: str):
 
 class Cli(BaseModel):
     cmd: str
+
+
+@app.post("/api/radio/cli")
+@_offline
+async def radio_cli(body: Cli):
+    """Run a companion CLI command on our own radio (firmware v1.18+ / protocol 14),
+    e.g. 'get wifi.status'. Replies are plain text."""
+    p = await radio.command("run_cli_command", body.cmd.strip())
+    return {"reply": p.get("message") or p.get("text") or p.get("reply") or p}
 
 
 @app.post("/api/contacts/{key}/cli")
