@@ -1327,13 +1327,21 @@ function renderConn() {
 
 function renderRadio() {
   const s = S.state; if (!s) return;
+  const slot = $("#radio-batt-type");
+  if (slot && s.public_key && !slot.contains(document.activeElement)) {
+    slot.innerHTML = battPicker("radio-batt", s.public_key);
+    $("#radio-batt").onchange = async (e) => {
+      try { await saveBattType("self", s.public_key, e.target.value); renderRadio(); loadStats(); }
+      catch (err) { e.target.value = battType(s.public_key); fail(err, "Couldn't save"); }
+    };
+  }
   const L = s.latest || {}, r = s.radio || {};
-  const v = L.battery?.level ? L.battery.level / 1000 : null;
+  const v = L.battery?.level ? L.battery.level / 1000 : null, bt = battType(s.public_key);
   const air = L.core?.uptime_secs ? (((L.radio?.tx_air_secs || 0) / L.core.uptime_secs) * 100).toFixed(2) + "%" : "–";
   const g = L.radio ? snrGrade(L.radio.last_snr) : null;
   const tiles = [
     ["Link", s.connected ? "Connected" : "Offline", s.connected ? `${{ usb: "USB", wifi: "WiFi" }[s.link] || "Bluetooth"} · ${ago(s.since)}` : (s.last_error || `for ${ago(s.since)}`), s.connected ? "ok" : "bad"],
-    ["Battery", v ? `${cellPct(v)}%` : "–", v ? `${v.toFixed(2)} V` : "", v && cellPct(v) < 20 ? "bad" : ""],
+    ["Battery", v ? `${cellPct(v, bt)}%` : "–", v ? `${v.toFixed(2)} V · ${BATT_TYPES[bt]}` : "", v && cellPct(v, bt) < 20 ? "bad" : ""],
     ["Last signal", L.radio ? `${L.radio.last_snr} dB` : "–", g ? `${g.word} · ${L.radio.last_rssi} dBm` : "", g ? (g.cls === "q-bad" ? "bad" : "") : ""],
     ["Noise floor", L.radio ? `${L.radio.noise_floor} dBm` : "–", "lower is quieter", ""],
     ["Uptime", L.core?.uptime_secs ? `${(L.core.uptime_secs / 3600).toFixed(1)} h` : "–", "", ""],
@@ -1482,7 +1490,7 @@ async function loadStats() {
     const max = Math.max(1, ...hops.map((h) => h.count));
     $("#hops").innerHTML = hops.map((h) => `<div style="height:${(h.count / max) * 100}%" title="${h.count} packets"><span>${h.hops}</span></div>`).join("");
   } else if (S.route[0] === "radio") {
-    plot("#c-bat", [samples.map((s) => s.ts / 1000), samples.map((s) => (s.battery?.level ? cellPct(s.battery.level / 1000) : null))],
+    plot("#c-bat", [samples.map((s) => s.ts / 1000), samples.map((s) => (s.battery?.level ? cellPct(s.battery.level / 1000, battType(S.state?.public_key)) : null))],
       [{ label: "Battery %", stroke: ok, width: 1.5 }], { scales: { x: { time: true }, y: { range: [0, 100] } } });
   }
 }
@@ -1851,11 +1859,21 @@ function showOut(title, body, tone = "") {
   o.scrollIntoView({ block: "nearest", behavior: "smooth" });
 }
 
-// Rough single-cell Li-ion (18650, NMC/NCA) resting voltage -> % — non-linear,
-// load-dependent, a ballpark. Same table as the bridge (watch.py cell_pct).
-function cellPct(v) {
-  const t = [[3.00, 0], [3.30, 3], [3.45, 10], [3.57, 20], [3.63, 30], [3.68, 40], [3.73, 50],
-    [3.80, 60], [3.87, 70], [3.95, 80], [4.05, 90], [4.18, 100]];
+// Single-cell resting voltage -> % per chemistry — non-linear, load-dependent,
+// a ballpark. Same tables as the bridge (watch.py CURVES). Radios only report
+// volts, so the type is set per device; cells in parallel read as one.
+const CURVES = {
+  liion: [[3.00, 0], [3.30, 3], [3.45, 10], [3.57, 20], [3.63, 30], [3.68, 40], [3.73, 50],
+    [3.80, 60], [3.87, 70], [3.95, 80], [4.05, 90], [4.18, 100]],
+  lipo: [[3.27, 0], [3.61, 5], [3.69, 10], [3.73, 20], [3.75, 25], [3.77, 30],
+    [3.79, 40], [3.82, 50], [3.87, 60], [3.92, 70], [3.98, 80], [4.06, 90], [4.20, 100]],
+  lifepo4: [[2.50, 0], [2.90, 5], [3.00, 10], [3.20, 20], [3.22, 30], [3.25, 40], [3.26, 50],
+    [3.28, 60], [3.30, 70], [3.32, 80], [3.33, 90], [3.40, 100]],
+};
+const BATT_TYPES = { liion: "18650 / Li-ion", lipo: "LiPo pouch", lifepo4: "LiFePO4" };
+const battType = (pk) => S.state?.battery_types?.[pk] || "liion";
+function cellPct(v, type = "liion") {
+  const t = CURVES[type] || CURVES.liion;
   if (v <= t[0][0]) return 0;
   if (v >= t[t.length - 1][0]) return 100;
   for (let i = 1; i < t.length; i++) {
@@ -1866,26 +1884,34 @@ function cellPct(v) {
   }
   return 100;
 }
+// A "Battery type" picker for one device (a contact's public key, or your radio's).
+const battPicker = (id, pk) => `<label class="batt-type">Battery type <select id="${id}">${Object.entries(BATT_TYPES)
+  .map(([k, l]) => `<option value="${k}"${battType(pk) === k ? " selected" : ""}>${l}</option>`).join("")}</select></label>`;
+async function saveBattType(key, pk, type) {
+  await api(`/battery-type/${encodeURIComponent(key)}`, { method: "POST", body: JSON.stringify({ type }) });
+  if (S.state) S.state.battery_types = { ...(S.state.battery_types || {}), [pk]: type };
+  toast(`Battery type: ${BATT_TYPES[type]}`);
+}
 
-function fmtTelemetry(t) {
+function fmtTelemetry(t, type) {
   if (!Array.isArray(t) || !t.length) return "No telemetry reported.";
   const out = {};
   for (const e of t) {
     const k = e.type === "voltage" ? "Battery" : e.type === "temperature" ? "Temperature"
       : e.type[0].toUpperCase() + e.type.slice(1) + (e.channel > 1 ? ` (${e.channel})` : "");
-    out[k] = e.type === "voltage" ? `${e.value < 4.35 ? `~${cellPct(e.value)}% · ` : ""}${e.value} V`
+    out[k] = e.type === "voltage" ? `${e.value < 4.35 ? `~${cellPct(e.value, type)}% · ` : ""}${e.value} V`
       : e.type === "temperature" ? `${e.value} °C` : esc(e.value);
   }
   return out;
 }
 
 // Repeater/room status: the raw counters, translated into what helps delivery debugging.
-function fmtStatus(r) {
+function fmtStatus(r, type) {
   const v = r.bat ? r.bat / 1000 : null, up = r.uptime || 0;
   const pctOf = (x) => up ? ` (${((x / up) * 100).toFixed(1)}%)` : "";
   const dur = (s) => s >= 86400 ? `${(s / 86400).toFixed(1)} days` : `${(s / 3600).toFixed(1)} h`;
   const out = {
-    Battery: v ? `${cellPct(v)}% · ${v.toFixed(2)} V` : null,
+    Battery: v ? `${cellPct(v, type)}% · ${v.toFixed(2)} V · ${BATT_TYPES[type] || BATT_TYPES.liion}` : null,
     Uptime: up ? dur(up) : null,
     "Hears you at": r.last_snr != null ? `<span class="chip ${snrGrade(r.last_snr).cls}">${r.last_snr} dB</span> <small>last packet it received</small>` : null,
     "Noise floor": r.noise_floor != null ? `${r.noise_floor} dBm` : null,
@@ -1909,20 +1935,29 @@ function bwCard(w, withLink = false) {
   return `<div class="bw-card ${bwTone(r)}">
     <div class="bw-top"><span class="name">${withLink ? `<a href="#/contact/${esc(w.public_key)}">${esc(w.name)}</a>` : "Battery watch"}</span>
       <span class="bw-pct">${r?.pct != null ? `${r.pct}%` : "–"}</span></div>
-    <div class="bw-sub">${r?.v ? `${r.v.toFixed(2)} V · ` : ""}alert below ${w.below}%${w.has_password ? "" : " · no login"}</div>
+    <div class="bw-sub">${r?.v ? `${r.v.toFixed(2)} V · ` : ""}${BATT_TYPES[w.battery_type] || BATT_TYPES.liion} · alert below ${w.below}%${w.has_password ? "" : " · no login"}</div>
     <div class="bw-sub">${esc(when)}</div>
   </div>`;
 }
 
 async function renderBatteryWatch(c) {
   const el = $("#c-bw"), my = nav;
-  if (c.type !== 2 && c.type !== 3) { el.innerHTML = ""; return; }
+  if (![2, 3, 4].includes(c.type)) { el.innerHTML = ""; return; }
+  const picker = () => {
+    el.insertAdjacentHTML("afterbegin", battPicker("c-batt", c.public_key));
+    $("#c-batt").onchange = async (e) => {
+      try { await saveBattType(c.prefix, c.public_key, e.target.value); if (my === nav) renderBatteryWatch(c); }
+      catch (err) { e.target.value = battType(c.public_key); fail(err, "Couldn't save"); }
+    };
+  };
+  if (c.type === 4) { el.innerHTML = ""; picker(); return; }   // sensors: no status login to watch
   let list;
   try { list = await api("/battery-watch"); } catch { el.innerHTML = ""; return; }
   if (my !== nav) return;
   const w = list.find((x) => x.public_key === c.public_key);
   if (w) {
     el.innerHTML = `${bwCard(w)}<div class="row-actions"><button class="btn sm" id="bw-check">Check now</button><button class="btn sm" id="bw-off">Stop watching</button></div>`;
+    picker();
     $("#bw-check").onclick = act($("#bw-check"), async () => {
       const r = await apiOTA(`/battery-watch/${c.prefix}/check`, { method: "POST" }, 1);
       if (my === nav) renderBatteryWatch(c);
@@ -1943,6 +1978,7 @@ async function renderBatteryWatch(c) {
       <label>Alert below (%) <input id="bw-below" type="number" min="5" max="90" value="30"></label>
       <button class="btn primary">Watch battery</button>
     </form></details>`;
+  picker();
   $("#bw-form").onsubmit = async (e) => {
     e.preventDefault();
     const body = { on: true, below: +$("#bw-below").value || 30, password: $("#bw-nologin").checked ? null : $("#bw-pw").value };
@@ -2041,7 +2077,7 @@ async function openContact(key) {
       if (a === "reset") { await api(`/contacts/${key}/reset-path`, { method: "POST" }); showOut("Route reset", "The next message floods and the radio learns a fresh route.", "ok"); }
       if (a === "status") {
         const r = await apiOTA(`/contacts/${key}/status`, {}, 2);
-        showOut("Status", fmtStatus(r), "ok");
+        showOut("Status", fmtStatus(r, battType(c.public_key)), "ok");
       }
       if (a === "trace") {
         const r = await apiOTA(`/contacts/${key}/trace`, { method: "POST" });
@@ -2052,7 +2088,7 @@ async function openContact(key) {
           Scale: `<small>${SNR_SCALE}</small>`,
         });
       }
-      if (a === "telemetry") showOut("Telemetry", fmtTelemetry(await apiOTA(`/contacts/${key}/telemetry`, {}, 2)));
+      if (a === "telemetry") showOut("Telemetry", fmtTelemetry(await apiOTA(`/contacts/${key}/telemetry`, {}, 2), battType(c.public_key)));
       if (a === "share") { const r = await api(`/contacts/${key}/uri`); showQr(c.name, r.uri, `Let someone scan this to add ${c.name}.`); }
       if (a === "remove") { await api(`/contacts/${key}`, { method: "DELETE" }); toast(`${c.name} removed`); location.hash = "#/contacts"; }
     } catch (err) {

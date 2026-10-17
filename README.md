@@ -89,7 +89,7 @@ A self-hosted web app for your [MeshCore](https://meshcore.io) LoRa radio. A sma
 **Repeater and room admin**
 - Log in (admin or guest), see status and telemetry (battery as %), and run CLI commands from a console. Over-the-air requests retry automatically on marginal links.
 - **Trace** gives the SNR in both directions to a neighbouring repeater. **Find path** names the repeaters between you and a contact.
-- **Status in plain words:** battery % (from an 18650 Li-ion curve, the cells most repeaters run; the voltage is always shown alongside), packets waiting, packets dropped while busy, duplicates and airtime — the numbers that explain lost messages.
+- **Status in plain words:** battery % (radios only report volts, so set each repeater's, sensor's and your own radio's **battery type**: 18650 / Li-ion by default, LiPo pouch or LiFePO4; the voltage is always shown alongside), packets waiting, packets dropped while busy, duplicates and airtime — the numbers that explain lost messages.
 - **Repeater battery watch:** checks a repeater's battery every 3 hours (logging in with the guest password if needed) and notifies you when it drops below your threshold.
 - **Back in range alerts:** a push when a ★ favourite you haven't heard from in 6+ hours shows up again.
 
