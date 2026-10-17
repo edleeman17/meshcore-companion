@@ -270,7 +270,10 @@ The bridge serves the whole app on port `8190`, so any reverse proxy just forwar
 - **Caddy with a real domain** (automatic Let's Encrypt): `mesh.example.com { reverse_proxy meshpi.local:8190 }`
 - **Caddy on a home network** (no domain): `mesh.lan { tls internal; reverse_proxy meshpi.local:8190 }`, then trust Caddy's root certificate on your phone (see below).
 - **nginx:** see `pwa/nginx.conf.template` (it serves the static files itself and proxies `/api/`).
-- **Docker** (front end only): set `BRIDGE_URL` in `docker-compose.yml`, then `docker compose up -d --build`, and put it behind your HTTPS proxy.
+- **Docker, USB radio** (bridge and web app together): `cp examples/docker.env.example .env`, set `RADIO_DEVICE` to your port from `ls /dev/serial/by-id/`, then `docker compose up -d --build`. The app is on port `8190`; put it behind your HTTPS proxy (or `tailscale serve --bg 8190`). Data and push keys live in the `bridge-data` volume. Only one program can use the radio, so stop the container (`docker compose stop bridge`) before using another client on the same port. Bluetooth radios: run the bridge on the host and use `docker compose --profile pwa up -d pwa` for the front end only (set `BRIDGE_URL` first).
+  - **Linux hosts only** for a USB radio: Docker Desktop on macOS can't pass a serial port into a container (run the bridge directly on the Mac), and on Windows it needs WSL 2 plus [`usbipd-win`](https://github.com/dorssel/usbipd-win).
+  - **Permission denied on the port?** The container joins the group that owns it, which is `dialout` (20) on Debian, Ubuntu and Raspberry Pi OS. On other distros set `RADIO_GID` in `.env` to the result of `stat -c %g "$(readlink -f /dev/serial/by-id/usb-…)"` (usually 14 on Arch, 18 on Fedora).
+  - **Unplugged or rebooted the radio?** The port is handed to the container when it starts. If the radio comes back on the same port (the usual case) the bridge reconnects by itself; if it comes back on a different one (`ttyACM1`), run `docker compose restart bridge`. ESP32 boards drop off USB briefly whenever they reboot, including **Reboot radio** in the app.
 - **Nomad:** `examples/nomad-pwa.nomad.hcl`.
 
 **Trusting a home-made certificate on your phone** (mkcert or Caddy `tls internal`): send yourself the root certificate (`mkcert -CAROOT` → `rootCA.pem`).

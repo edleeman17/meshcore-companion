@@ -1,12 +1,44 @@
-# Front end only. The bridge runs directly on the Bluetooth host (see README),
-# because BLE from inside a container is more trouble than it's worth.
-# Put this behind HTTPS (Caddy/Traefik/your reverse proxy): service workers and
-# Web Push only work on a secure origin.
+# USB radio: the bridge runs here and serves the web app on :8190.
+#   cp examples/docker.env.example .env   # set RADIO_DEVICE (ls /dev/serial/by-id/)
+#   docker compose up -d --build
+# Bluetooth: run the bridge on the host instead (README); BLE from inside a
+# container is more trouble than it's worth. Then start only the front end:
+#   docker compose --profile pwa up -d pwa
+# Put either behind HTTPS (Tailscale serve/Caddy/your reverse proxy): service
+# workers and Web Push only work on a secure origin.
 services:
+  bridge:
+    build:
+      context: .
+      dockerfile: bridge/Dockerfile
+    devices:
+      # long form: by-id names often contain colons (the board's MAC address)
+      - source: ${RADIO_DEVICE:?set RADIO_DEVICE in .env (ls /dev/serial/by-id/)}
+        target: /dev/ttyACM0
+        permissions: rwm
+    # the group that owns the port on the host (stat -c %g /dev/ttyACM0): 20 on
+    # Debian/Ubuntu/Raspberry Pi OS, 14 on Arch, 18 on Fedora
+    group_add:
+      - "${RADIO_GID:-20}"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      RADIO_SERIAL: /dev/ttyACM0
+    volumes:
+      - bridge-data:/data
+    ports:
+      - "8190:8190"
+    restart: unless-stopped
+
   pwa:
+    profiles: [pwa]
     build: ./pwa
     ports:
       - "8080:80"
     environment:
       BRIDGE_URL: http://192.0.2.10:8190   # <- your bridge host:port
     restart: unless-stopped
+
+volumes:
+  bridge-data:
