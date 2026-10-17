@@ -377,6 +377,7 @@ function reactionText(m, emoji) {
 }
 // Reactions grouped onto their target message id; their own rows are hidden.
 // A reaction of yours that failed stays a normal bubble so it can be resent.
+// Each person counts once per emoji, so a repeat (or a resend) doesn't inflate it.
 function groupReactions(rows) {
   const on = new Map(), hide = new Set();
   rows.forEach((m, i) => {
@@ -385,20 +386,36 @@ function groupReactions(rows) {
     const t = reactionTarget(rows, m, p, i); if (!t) return;
     hide.add(m.id);
     if (!on.has(t.id)) on.set(t.id, []);
-    on.get(t.id).push({ id: m.id, emoji: p.emoji, mine: m.direction === "out", pending: m.status === "sending",
-      who: m.direction === "out" ? "You" : m.sender || contactName(m.peer) });
+    const list = on.get(t.id), mine = m.direction === "out";
+    const who = mine ? "You" : m.sender || contactName(m.peer);
+    const r = { id: m.id, ts: m.ts, emoji: p.emoji, mine, pending: m.status === "sending", who };
+    const dup = list.findIndex((x) => x.emoji === r.emoji && x.mine === mine && x.who === who);
+    if (dup < 0) list.push(r); else list[dup] = { ...r, id: list[dup].id };   // keep its place, take the latest
   });
   return { on, hide };
 }
-function reactsHtml(list, fresh) {
-  if (!list?.length) return "";
+const byEmoji = (list) => {
   const by = new Map();
   for (const r of list) { if (!by.has(r.emoji)) by.set(r.emoji, []); by.get(r.emoji).push(r); }
-  return `<div class="reacts">${[...by].map(([emoji, rs]) => {
+  return by;
+};
+function reactsHtml(list, fresh, msgId) {
+  if (!list?.length) return "";
+  return `<div class="reacts">${[...byEmoji(list)].map(([emoji, rs]) => {
     const cls = (rs.some((r) => r.mine) ? " mine" : "") + (rs.every((r) => r.pending) ? " pending" : "");
     const anim = rs.some((r) => fresh.has(r.id)) ? "" : ` style="animation:none"`;
-    return `<span class="react${cls}"${anim} title="${esc(rs.map((r) => r.who).join(", "))}">${emoji}${rs.length > 1 ? `<b>${rs.length}</b>` : ""}</span>`;
+    const names = rs.map((r) => r.who).join(", ");
+    return `<button type="button" class="react${cls}"${anim} data-reacts="${msgId}" data-emoji="${esc(emoji)}" title="${esc(names)}" aria-label="${esc(`${emoji} ${rs.length}: ${names}`)}">${emoji}${rs.length > 1 ? `<b>${rs.length}</b>` : ""}</button>`;
   }).join("")}</div>`;
+}
+// Who reacted to a message: the tapped emoji first, then the rest, newest first in each.
+function reactionDetails(msgId, first) {
+  const list = S.reacts?.get(msgId); if (!list?.length) return;
+  const groups = [...byEmoji(list)].sort(([a], [b]) => (b === first) - (a === first));
+  const when = (ts) => new Date(ts).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+  showSheet(`<h3 tabindex="-1">Reactions</h3>` + groups.map(([emoji, rs]) =>
+    `<section class="react-who"><h4><span>${emoji}</span> ${rs.length}</h4><ul>${[...rs].sort((a, b) => b.ts - a.ts).map((r) =>
+      `<li><span class="name${r.mine ? "" : " tint"}"${r.mine ? "" : tint(r.who)}>${esc(r.who)}</span>${r.pending ? `<span class="muted">sending…</span>` : `<time>${when(r.ts)}</time>`}</li>`).join("")}</ul></section>`).join(""));
 }
 
 // Inline contact cards people paste in chat: <64-hex pubkey:type:name>
@@ -490,7 +507,7 @@ function msgHtml(m, reacts = null, fresh = new Set()) {
     ? `<p class="hint-line">No repeater was heard carrying this, so it didn't get out. Resend.</p>` : "";
   const arrive = fresh.has(m.id) ? " arrive" : "";
   return `<div class="msg ${m.direction}${m.mention ? " mention" : ""}${m.hidden ? " is-hidden" : ""}${arrive}" data-id="${m.id}"><span class="swipe-ico" aria-hidden="true">↩</span>${who}<div class="text">${renderText(m.text)}</div>
-    ${reactsHtml(reacts, fresh)}<div class="foot">${dmBadges}${warn}${sig}${hops}${rtt}<span>${hhmm(m.ts)}</span>${m.kind === "chan" && m.direction === "out" ? echo : dmEcho + st}</div>${failHint}${chanHint}${resend}</div>`;
+    ${reactsHtml(reacts, fresh, m.id)}<div class="foot">${dmBadges}${warn}${sig}${hops}${rtt}<span>${hhmm(m.ts)}</span>${m.kind === "chan" && m.direction === "out" ? echo : dmEcho + st}</div>${failHint}${chanHint}${resend}</div>`;
 }
 
 function showSheet(html, { noClose = false } = {}) {
@@ -736,6 +753,8 @@ $("#msgs").addEventListener("click", async (e) => {
     catch (err) { fail(err, "Couldn't resend"); rs.disabled = false; rs.textContent = "↻ Resend"; }
     return;
   }
+  const rc = e.target.closest("[data-reacts]");
+  if (rc) { e.stopPropagation(); reactionDetails(+rc.dataset.reacts, rc.dataset.emoji); return; }
   const at = e.target.closest("[data-mention]");
   if (at) {
     text.value = `@[${at.dataset.mention}] ` + text.value; text.focus(); text.dispatchEvent(new Event("input"));
@@ -876,6 +895,7 @@ function renderThread(forceBottom = false) {
   const el = scroller(), keep = el.scrollTop;
   const lr = S.lastRead || 0;
   const { on, hide } = groupReactions(S.thread);
+  S.reacts = on;
   const shown = S.thread.filter((m) => !hide.has(m.id));
   // Only messages (and reactions) that arrived since the last render animate in.
   const fresh = new Set(S.seen ? S.thread.filter((m) => !S.seen.has(m.id)).map((m) => m.id) : []);
