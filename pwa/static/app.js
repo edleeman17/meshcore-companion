@@ -441,25 +441,29 @@ async function openThread(kind, peer) {
   const pr = kind === "dm" && presence(contactByPrefix(peer));
   if (pr) $("#title").insertAdjacentHTML("beforeend", ` <small class="presence ${pr.cls}" title="${esc(pr.how)}">${esc(pr.text)}</small>`);
   const key = `${kind}:${peer}`, cached = threadCache.get(key);
+  // Show what we had straight away, at the bottom; the fresh copy replaces it
+  // in place a moment later. That includes the chat you had open last time:
+  // its rows are still here, but the screen in between scrolled the page.
+  let early = false;
   if (S.threadKey !== key) {
     S.threadKey = key; S.seen = null; clearReply();
-    // Show what we had straight away; the fresh copy replaces it in a moment.
-    if (cached) { S.thread = cached; S.lastRead = 0; renderThread(true); }
+    if (cached) S.thread = cached;
     else { S.thread = []; $("#msgs").innerHTML = `<p class="empty">Loading…</p>`; }
   }
+  if (S.thread.length) { S.lastRead = 0; renderThread(true); early = true; }
   const readP = api(`/read/${kind}/${encodeURIComponent(peer)}`).then((r) => r.last_read || 0, () => 0);
   const rowsP = fetchThread(kind, peer);
-  if (!cached) navWait = Promise.all([readP, rowsP]).then(() => new Promise(requestAnimationFrame), () => {});
+  if (!early) navWait = Promise.all([readP, rowsP]).then(() => new Promise(requestAnimationFrame), () => {});
   const last = await readP;
   if (my !== nav) return;
   S.lastRead = last;
   markRead(kind, peer);   // advances read to now; S.lastRead holds where we were
   let rows;
   try { rows = await rowsP; }
-  catch { if (my === nav && !cached) $("#msgs").innerHTML = `<p class="empty">Can't load messages — the bridge isn't reachable.</p>`; return; }
+  catch { if (my === nav && !early) $("#msgs").innerHTML = `<p class="empty">Can't load messages — the bridge isn't reachable.</p>`; return; }
   if (my !== nav) return;
   S.thread = rows;
-  renderThread(!cached);
+  renderThread(!early);
   loadHiddenBar(kind, peer);
 }
 
@@ -2503,8 +2507,13 @@ text.addEventListener("blur", () => setTimeout(() => {
 }, 150));
 text.addEventListener("focus", () => setTimeout(setKb, 300));
 window.visualViewport?.addEventListener("scroll", setKb);
-new ResizeObserver(([e]) => document.documentElement.style.setProperty("--composer-h", e.target.offsetHeight + "px"))
-  .observe($("#composer"));
+// The page is padded to clear the composer, so when it grows (first shown, the
+// reply bar, a second line of text) stay at the bottom if that's where you were.
+new ResizeObserver(([e]) => {
+  const stay = document.body.classList.contains("in-thread") && nearBottom();
+  document.documentElement.style.setProperty("--composer-h", e.target.offsetHeight + "px");
+  if (stay) scroller().scrollTop = 1e9;
+}).observe($("#composer"));
 
 // ---------- theme ----------
 // Mode (System/Light/Dark) and colour theme are separate: every theme has a
