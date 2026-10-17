@@ -192,12 +192,9 @@ code { font-family: var(--mono); font-size: .85em; }
 .pill.up { color: var(--ok); } .pill.down { color: var(--bad); }
 
 /* ---- layout ---- */
-main { flex: 1; overflow: auto; padding: 0 var(--pad) calc(var(--tabs-h) + env(safe-area-inset-bottom) + 1rem);
+main { flex: 1; overflow: auto; background: var(--bg); padding: 0 var(--pad) calc(var(--tabs-h) + env(safe-area-inset-bottom) + 1rem);
   -webkit-overflow-scrolling: touch; }
 .view { max-width: 44rem; margin: 0 auto; }
-.view:not([hidden]) { animation: view-in .2s var(--ease-out); }
-/* no transform on the conversation: it would pin the fixed composer to the view mid-animation */
-#v-thread:not([hidden]), #v-map:not([hidden]) { animation: fade .16s ease-out; }
 @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
 .sub {
   font-size: .68rem; font-weight: 700; letter-spacing: .14em; text-transform: uppercase;
@@ -409,6 +406,8 @@ a:focus-visible, button:focus-visible, summary:focus-visible { outline: 2px soli
   border-left: 3px solid var(--ok); animation: rise .24s var(--spring);
 }
 .toast.err { border-left-color: var(--bad); }
+.toast.leaving { animation: sink .18s ease-in forwards; }
+@keyframes sink { to { opacity: 0; transform: translate(-50%, .5rem) scale(.97); } }
 body.in-thread .toast { bottom: calc(var(--composer-h, 4rem) + var(--kb, 0px) + .8rem); }
 @keyframes rise { from { opacity: 0; transform: translate(-50%, .6rem); } to { opacity: 1; transform: translate(-50%, 0); } }
 
@@ -437,6 +436,8 @@ dialog#sheet {
 @media (min-width: 40rem) { dialog#sheet { margin: auto; padding-bottom: 1.1rem; } }
 @keyframes sheet { from { transform: translateY(1.5rem); opacity: 0; } to { transform: none; opacity: 1; } }
 dialog#sheet::backdrop { background: #0008; animation: fade .2s ease-out; }
+dialog#sheet.closing::backdrop { animation: fade-out .15s ease-in forwards; }
+@keyframes fade-out { to { opacity: 0; } }
 dialog#sheet h3 { margin: 0 0 .6rem; font-size: 1.15rem; outline: 0; }
 dialog#sheet .actions { flex-direction: column; align-items: stretch; }
 dialog#sheet .actions .btn { width: 100%; justify-content: flex-start; }
@@ -695,7 +696,8 @@ fieldset#lora:disabled { opacity: .55; }
 .list > :nth-child(n+6) { animation-delay: .1s; }
 .list.settled > a, .list.settled > label { animation: none; }
 @keyframes row-in { from { opacity: 0; transform: translateY(.3rem); } to { opacity: 1; transform: none; } }
-.list:not(.settled) .count-badge, .dot { animation: pop .3s var(--spring); }
+/* only on a list's first fill (and the tab badge); a live refresh re-renders them */
+.list:not(.settled) .count-badge, .list:not(.settled) .dot, .tabs .dot { animation: pop .3s var(--spring); }
 @keyframes pop { from { transform: scale(.4); opacity: 0; } to { transform: scale(1); opacity: 1; } }
 .msg { transition: transform .25s var(--spring), border-color .15s, opacity .2s; }
 .msg.arrive { animation: msg-in-l .28s var(--spring); }
@@ -770,3 +772,49 @@ button.react:hover { background: var(--surface-2); }
 .palettes button.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
 .palettes .sw { display: flex; height: 1.4rem; border: 1px solid var(--line); }
 .palettes .sw i { flex: 1; }
+
+/* ---- active-tab marker: one bar that slides between tabs ---- */
+.tabs .tab-mark { position: absolute; left: 0; top: -1px; height: 2px; background: var(--accent); pointer-events: none;
+  will-change: transform; }
+.tabs .tab-mark.ready { transition: transform .32s var(--spring), width .32s var(--spring), height .32s var(--spring); }
+.tabs:has(.tab-mark:not([hidden])) a.on { border-top-color: transparent; }
+@media (min-width: 64rem) {
+  .tabs .tab-mark { top: 0; width: 3px; }
+  .tabs:has(.tab-mark:not([hidden])) a.on { border-left-color: transparent; }
+}
+/* pressed rows and buttons answer the finger at once (no wait for the tap to resolve) */
+.list a:active, .menu a:active { background: var(--surface-2); transition-duration: 0s; }
+
+/* ---- screen-to-screen slides (View Transitions, phones) ----
+   Only the page area, the tab bar and its marker are snapshotted; the header
+   stays live. Push: the new page comes over from the right while the old one
+   eases left and dims. Pop is the reverse. Tabs: a short slide and fade. */
+:root { view-transition-name: none; }
+main { view-transition-name: page; }
+.tabs { view-transition-name: tabs; }
+.tabs .tab-mark { view-transition-name: tab-mark; }
+::view-transition-group(*) { animation-duration: .34s; animation-timing-function: cubic-bezier(.2, .8, .2, 1); }
+::view-transition-group(tab-mark) { animation-timing-function: var(--spring); }
+/* Safari blends the two snapshots additively (made for crossfades); the slides
+   need one page drawn over the other. */
+html[data-nav]::view-transition-old(*), html[data-nav]::view-transition-new(*) { mix-blend-mode: normal; }
+html[data-nav=push]::view-transition-new(page) { animation: .34s cubic-bezier(.2, .8, .2, 1) both vt-from-right; z-index: 1; box-shadow: -.5rem 0 1.5rem #0003; }
+html[data-nav=push]::view-transition-old(page), html[data-nav=push]::view-transition-old(tabs),
+html[data-nav=push]::view-transition-old(tab-mark) { animation: .34s cubic-bezier(.2, .8, .2, 1) both vt-to-left-dim; }
+html[data-nav=pop]::view-transition-old(page) { animation: .3s cubic-bezier(.3, .7, .2, 1) both vt-to-right; z-index: 1; box-shadow: -.5rem 0 1.5rem #0003; }
+html[data-nav=pop]::view-transition-new(page), html[data-nav=pop]::view-transition-new(tabs),
+html[data-nav=pop]::view-transition-new(tab-mark) { animation: .3s cubic-bezier(.3, .7, .2, 1) both vt-from-left-dim; }
+html[data-nav=next]::view-transition-old(page) { animation: .2s ease-in both vt-out-l; }
+html[data-nav=next]::view-transition-new(page) { animation: .26s cubic-bezier(.2, .8, .2, 1) .04s both vt-in-r; }
+html[data-nav=prev]::view-transition-old(page) { animation: .2s ease-in both vt-out-r; }
+html[data-nav=prev]::view-transition-new(page) { animation: .26s cubic-bezier(.2, .8, .2, 1) .04s both vt-in-l; }
+html[data-nav=swap]::view-transition-group(page) { animation-duration: .18s; }
+@keyframes vt-from-right { from { transform: translateX(100%); } }
+@keyframes vt-to-right { to { transform: translateX(100%); } }
+@keyframes vt-to-left-dim { to { transform: translateX(-28%); opacity: .5; } }
+@keyframes vt-from-left-dim { from { transform: translateX(-28%); opacity: .5; } }
+@keyframes vt-out-l { to { transform: translateX(-2.5rem); opacity: 0; } }
+@keyframes vt-out-r { to { transform: translateX(2.5rem); opacity: 0; } }
+@keyframes vt-in-r { from { transform: translateX(2.5rem); opacity: 0; } }
+@keyframes vt-in-l { from { transform: translateX(-2.5rem); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { ::view-transition-group(*), ::view-transition-old(*), ::view-transition-new(*) { animation: none !important; } }
