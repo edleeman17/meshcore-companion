@@ -121,8 +121,21 @@ function navKind(from, to) {
 // The page is snapshotted, so the browser does the work off the main thread.
 let inVT = false, navWait = null, lastSlide = -1e9;
 const canVT = () => !!document.startViewTransition && !wide && !calmMq.matches;
+// iOS edge-swipe back/forward already slides the page in itself; animating again
+// afterwards plays a second, backwards-looking slide. The browser says so where
+// it can (hasUAVisualTransition); otherwise a touch that began at the screen's
+// edge just before the history step means it was the swipe.
+let edgeTouch = -1e9, uaSwiped = false;
+addEventListener("touchstart", (e) => {
+  const x = e.touches[0]?.clientX ?? 99;
+  if (x < 24 || x > innerWidth - 24) edgeTouch = performance.now();
+}, { passive: true, capture: true });
+addEventListener("popstate", (e) => {
+  uaSwiped = !!e.hasUAVisualTransition || performance.now() - edgeTouch < 1500;
+});
 function navigate() {
   const from = S.route, to = routeParts();
+  if (uaSwiped) { uaSwiped = false; edgeTouch = -1e9; return go(true); }
   if (!canVT() || !nav || from.join("/") === to.join("/")) return go();
   const root = document.documentElement;
   root.dataset.nav = navKind(from, to);
@@ -138,7 +151,7 @@ function navigate() {
   vt.finished.finally(() => { inVT = false; delete root.dataset.nav; });
 }
 function animateNav(from, to, before) {
-  if (!from) return;
+  if (!from) { moveTabMark(false); return; }
   const fd = depthOf(from), td = depthOf(to), ft = TAB_ORDER.indexOf(tabOf(from)), tt = TAB_ORDER.indexOf(tabOf(to));
   const kind = navKind(from, to);
   const { x, ms } = MOVES[kind];
@@ -197,8 +210,8 @@ const settleObs = new MutationObserver((muts) => {
   }
 });
 document.querySelectorAll(".list").forEach((l) => settleObs.observe(l, { childList: true }));
-function go() {
-  const from = nav ? S.route : null, before = shownPanes();
+function go(still = false) {
+  const from = nav && !still ? S.route : null, before = shownPanes();
   nav++;
   $("#sheet").open && $("#sheet").close();
   closeMsgMenu();
@@ -337,7 +350,9 @@ async function loadConvs() {
   const notify = new Set(S.state?.notify_channels || []);
   setBadge(S.convs.reduce((n, c) => n + (c.kind === "dm" || notify.has(c.peer) ? c.unread : c.mentions), 0));
   const seen = new Set(S.convs.map((c) => `${c.kind}:${c.peer}`));
-  const active = [...S.convs].sort((a, b) => (b.last_ts || 0) - (a.last_ts || 0));
+  // Unread conversations first, then newest first.
+  const isUnread = (c) => c.unread > 0 || c.mentions > 0 ? 1 : 0;
+  const active = [...S.convs].sort((a, b) => isUnread(b) - isUnread(a) || (b.last_ts || 0) - (a.last_ts || 0));
   const quiet = Object.keys(S.state?.channels || {}).filter((idx) => !seen.has(`chan:${idx}`))
     .map((idx) => ({ kind: "chan", peer: idx, last_text: "No messages yet", last_ts: 0 }));
   $("#convs").innerHTML = active.map(convRow).join("")
