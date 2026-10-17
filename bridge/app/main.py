@@ -19,7 +19,7 @@ from .db import DB, now_ms
 from .hub import Hub
 from .radio import Radio
 from .qrz import CALL_RE, QRZ
-from .watch import OTA_TIMEOUT, Watch
+from .watch import CURVES, OTA_TIMEOUT, Watch, battery_type, cell_pct
 from . import topology
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -105,7 +105,8 @@ def metrics():
 @app.get("/api/state")
 def state():
     return {**radio.state(), "vapid_public_key": VAPID_PUBLIC, "qrz_configured": qrz.configured,
-            "notify_channels": db.get_setting("notify_channels", [])}
+            "notify_channels": db.get_setting("notify_channels", []),
+            "battery_types": db.get_setting("battery_types", {}) or {}}
 
 
 @app.get("/api/contacts")
@@ -818,8 +819,12 @@ class BatteryWatchIn(BaseModel):
 def battery_watch_list():
     w, r = watch.watched(), watch.readings()
     names = {k: c.get("adv_name") for k, c in (radio.mc.contacts.items() if radio.mc else [])}
+    for k, x in r.items():   # stored under an older curve or battery type: recompute from the voltage
+        if x.get("v"):
+            x["pct"] = cell_pct(x["v"], battery_type(db, k))
     return [{"public_key": k, "prefix": k[:12], "name": names.get(k) or k[:8], "below": v.get("below", 30),
-             "has_password": v.get("password") is not None, "reading": r.get(k)} for k, v in w.items()]
+             "has_password": v.get("password") is not None, "reading": r.get(k),
+             "battery_type": battery_type(db, k)} for k, v in w.items()]
 
 
 @app.post("/api/battery-watch/{key}")
@@ -846,6 +851,28 @@ async def battery_watch_check(key: str):
 
 class BackIn(BaseModel):
     on: bool
+
+
+class BatteryTypeIn(BaseModel):
+    type: str
+
+
+@app.post("/api/battery-type/{key}")
+def battery_type_set(key: str, body: BatteryTypeIn):
+    """What a device runs on (radios only report volts): a contact, or your own radio."""
+    if body.type not in CURVES:
+        raise HTTPException(400, f"type must be one of {', '.join(CURVES)}")
+    me = radio.state().get("public_key")
+    try:
+        pk = me if key in ("self", me) else radio.contact(key)["public_key"]
+    except KeyError:
+        raise HTTPException(404, "unknown contact")
+    if not pk:
+        raise HTTPException(409, "radio not connected yet")
+    types = db.get_setting("battery_types", {}) or {}
+    types[pk] = body.type
+    db.set_setting("battery_types", types)
+    return {"ok": True, "public_key": pk, "type": body.type}
 
 
 @app.post("/api/notify-back")

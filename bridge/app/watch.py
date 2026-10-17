@@ -1,6 +1,7 @@
 """Background watches: favourite repeaters' batteries, and favourites coming back
 into range. Alerts go out as Web Push (and an SSE `alert` event)."""
 import asyncio
+import math
 import logging
 import time
 
@@ -17,16 +18,37 @@ OFFLINE_ALERT_SECS = 300       # radio unreachable this long = alert (e.g. its p
 OTA_TIMEOUT = 20               # login/status over the mesh: floods can take a while
 
 
-def lipo_pct(v: float) -> int:
-    """Rough single-cell LiPo resting voltage -> % (same table as the PWA)."""
-    t = [(3.27, 0), (3.61, 5), (3.69, 10), (3.73, 20), (3.75, 25), (3.77, 30),
-         (3.79, 40), (3.82, 50), (3.87, 60), (3.92, 70), (3.98, 80), (4.06, 90), (4.20, 100)]
+# Single-cell resting voltage -> % per chemistry (same tables as the PWA). The
+# radios only ever report a voltage, so the type is something you tell the app,
+# per device. Cells in parallel read the same as one. Measured while the radio
+# listens, so a ballpark either way.
+CURVES = {
+    # 18650 and other Li-ion (NMC/NCA): what most repeaters run. The default.
+    "liion": [(3.00, 0), (3.30, 3), (3.45, 10), (3.57, 20), (3.63, 30), (3.68, 40), (3.73, 50),
+              (3.80, 60), (3.87, 70), (3.95, 80), (4.05, 90), (4.18, 100)],
+    # LiPo pouch cells (RC-style resting table).
+    "lipo": [(3.27, 0), (3.61, 5), (3.69, 10), (3.73, 20), (3.75, 25), (3.77, 30),
+             (3.79, 40), (3.82, 50), (3.87, 60), (3.92, 70), (3.98, 80), (4.06, 90), (4.20, 100)],
+    # LiFePO4: flat around 3.2-3.3 V for most of its charge.
+    "lifepo4": [(2.50, 0), (2.90, 5), (3.00, 10), (3.20, 20), (3.22, 30), (3.25, 40), (3.26, 50),
+                (3.28, 60), (3.30, 70), (3.32, 80), (3.33, 90), (3.40, 100)],
+}
+DEFAULT_CHEM = "liion"
+
+
+def cell_pct(v: float, chem: str = DEFAULT_CHEM) -> int:
+    t = CURVES.get(chem) or CURVES[DEFAULT_CHEM]
     if v <= t[0][0]:
         return 0
     for (v0, p0), (v1, p1) in zip(t, t[1:]):
         if v <= v1:
-            return round(p0 + (p1 - p0) * (v - v0) / (v1 - v0))
+            return math.floor(p0 + (p1 - p0) * (v - v0) / (v1 - v0) + 0.5)   # halves up, like the PWA's Math.round
     return 100
+
+
+def battery_type(db, pk: str) -> str:
+    """The chemistry set for a device (repeater, sensor or your own radio) by public key."""
+    return (db.get_setting("battery_types", {}) or {}).get(pk, DEFAULT_CHEM)
 
 
 class Watch:
@@ -138,7 +160,7 @@ class Watch:
             if not st:
                 raise ValueError("no reply (timed out)")
             v = (st.get("bat") or 0) / 1000
-            reading.update({"v": round(v, 3), "pct": lipo_pct(v) if v else None,
+            reading.update({"v": round(v, 3), "pct": cell_pct(v, battery_type(self.db, pk)) if v else None,
                             "uptime": st.get("uptime"), "noise_floor": st.get("noise_floor"),
                             "tx_queue_len": st.get("tx_queue_len"), "full_evts": st.get("full_evts"),
                             "last_snr": st.get("last_snr")})
