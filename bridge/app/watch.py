@@ -17,10 +17,16 @@ OFFLINE_ALERT_SECS = 300       # radio unreachable this long = alert (e.g. its p
 OTA_TIMEOUT = 20               # login/status over the mesh: floods can take a while
 
 
-def lipo_pct(v: float) -> int:
-    """Rough single-cell LiPo resting voltage -> % (same table as the PWA)."""
-    t = [(3.27, 0), (3.61, 5), (3.69, 10), (3.73, 20), (3.75, 25), (3.77, 30),
-         (3.79, 40), (3.82, 50), (3.87, 60), (3.92, 70), (3.98, 80), (4.06, 90), (4.20, 100)]
+def cell_pct(v: float) -> int:
+    """Rough single-cell Li-ion resting voltage -> % (same table as the PWA).
+
+    Most repeaters (and many companions) run 18650s, NMC/NCA, often several in
+    parallel, which reads the same as one cell. Their curve sits lower and
+    flatter mid-range than the RC LiPo table this replaced, which read about
+    20 points low around 3.8 V. Measured while the radio listens, so a ballpark.
+    """
+    t = [(3.00, 0), (3.30, 3), (3.45, 10), (3.57, 20), (3.63, 30), (3.68, 40), (3.73, 50),
+         (3.80, 60), (3.87, 70), (3.95, 80), (4.05, 90), (4.18, 100)]
     if v <= t[0][0]:
         return 0
     for (v0, p0), (v1, p1) in zip(t, t[1:]):
@@ -138,7 +144,7 @@ class Watch:
             if not st:
                 raise ValueError("no reply (timed out)")
             v = (st.get("bat") or 0) / 1000
-            reading.update({"v": round(v, 3), "pct": lipo_pct(v) if v else None,
+            reading.update({"v": round(v, 3), "pct": cell_pct(v) if v else None,
                             "uptime": st.get("uptime"), "noise_floor": st.get("noise_floor"),
                             "tx_queue_len": st.get("tx_queue_len"), "full_evts": st.get("full_evts"),
                             "last_snr": st.get("last_snr")})

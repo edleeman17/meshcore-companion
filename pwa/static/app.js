@@ -1333,7 +1333,7 @@ function renderRadio() {
   const g = L.radio ? snrGrade(L.radio.last_snr) : null;
   const tiles = [
     ["Link", s.connected ? "Connected" : "Offline", s.connected ? `${{ usb: "USB", wifi: "WiFi" }[s.link] || "Bluetooth"} · ${ago(s.since)}` : (s.last_error || `for ${ago(s.since)}`), s.connected ? "ok" : "bad"],
-    ["Battery", v ? `${lipoPct(v)}%` : "–", v ? `${v.toFixed(2)} V` : "", v && lipoPct(v) < 20 ? "bad" : ""],
+    ["Battery", v ? `${cellPct(v)}%` : "–", v ? `${v.toFixed(2)} V` : "", v && cellPct(v) < 20 ? "bad" : ""],
     ["Last signal", L.radio ? `${L.radio.last_snr} dB` : "–", g ? `${g.word} · ${L.radio.last_rssi} dBm` : "", g ? (g.cls === "q-bad" ? "bad" : "") : ""],
     ["Noise floor", L.radio ? `${L.radio.noise_floor} dBm` : "–", "lower is quieter", ""],
     ["Uptime", L.core?.uptime_secs ? `${(L.core.uptime_secs / 3600).toFixed(1)} h` : "–", "", ""],
@@ -1482,7 +1482,7 @@ async function loadStats() {
     const max = Math.max(1, ...hops.map((h) => h.count));
     $("#hops").innerHTML = hops.map((h) => `<div style="height:${(h.count / max) * 100}%" title="${h.count} packets"><span>${h.hops}</span></div>`).join("");
   } else if (S.route[0] === "radio") {
-    plot("#c-bat", [samples.map((s) => s.ts / 1000), samples.map((s) => (s.battery?.level ? lipoPct(s.battery.level / 1000) : null))],
+    plot("#c-bat", [samples.map((s) => s.ts / 1000), samples.map((s) => (s.battery?.level ? cellPct(s.battery.level / 1000) : null))],
       [{ label: "Battery %", stroke: ok, width: 1.5 }], { scales: { x: { time: true }, y: { range: [0, 100] } } });
   }
 }
@@ -1851,10 +1851,11 @@ function showOut(title, body, tone = "") {
   o.scrollIntoView({ block: "nearest", behavior: "smooth" });
 }
 
-// Rough single-cell LiPo resting voltage -> % (non-linear, load-dependent — a ballpark).
-function lipoPct(v) {
-  const t = [[3.27, 0], [3.61, 5], [3.69, 10], [3.73, 20], [3.75, 25], [3.77, 30],
-    [3.79, 40], [3.82, 50], [3.87, 60], [3.92, 70], [3.98, 80], [4.06, 90], [4.20, 100]];
+// Rough single-cell Li-ion (18650, NMC/NCA) resting voltage -> % — non-linear,
+// load-dependent, a ballpark. Same table as the bridge (watch.py cell_pct).
+function cellPct(v) {
+  const t = [[3.00, 0], [3.30, 3], [3.45, 10], [3.57, 20], [3.63, 30], [3.68, 40], [3.73, 50],
+    [3.80, 60], [3.87, 70], [3.95, 80], [4.05, 90], [4.18, 100]];
   if (v <= t[0][0]) return 0;
   if (v >= t[t.length - 1][0]) return 100;
   for (let i = 1; i < t.length; i++) {
@@ -1872,7 +1873,7 @@ function fmtTelemetry(t) {
   for (const e of t) {
     const k = e.type === "voltage" ? "Battery" : e.type === "temperature" ? "Temperature"
       : e.type[0].toUpperCase() + e.type.slice(1) + (e.channel > 1 ? ` (${e.channel})` : "");
-    out[k] = e.type === "voltage" ? `${e.value < 4.35 ? `~${lipoPct(e.value)}% · ` : ""}${e.value} V`
+    out[k] = e.type === "voltage" ? `${e.value < 4.35 ? `~${cellPct(e.value)}% · ` : ""}${e.value} V`
       : e.type === "temperature" ? `${e.value} °C` : esc(e.value);
   }
   return out;
@@ -1884,7 +1885,7 @@ function fmtStatus(r) {
   const pctOf = (x) => up ? ` (${((x / up) * 100).toFixed(1)}%)` : "";
   const dur = (s) => s >= 86400 ? `${(s / 86400).toFixed(1)} days` : `${(s / 3600).toFixed(1)} h`;
   const out = {
-    Battery: v ? `${lipoPct(v)}% · ${v.toFixed(2)} V` : null,
+    Battery: v ? `${cellPct(v)}% · ${v.toFixed(2)} V` : null,
     Uptime: up ? dur(up) : null,
     "Hears you at": r.last_snr != null ? `<span class="chip ${snrGrade(r.last_snr).cls}">${r.last_snr} dB</span> <small>last packet it received</small>` : null,
     "Noise floor": r.noise_floor != null ? `${r.noise_floor} dBm` : null,

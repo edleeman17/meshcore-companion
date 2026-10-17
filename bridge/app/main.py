@@ -19,7 +19,7 @@ from .db import DB, now_ms
 from .hub import Hub
 from .radio import Radio
 from .qrz import CALL_RE, QRZ
-from .watch import OTA_TIMEOUT, Watch
+from .watch import OTA_TIMEOUT, Watch, cell_pct
 from . import topology
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -818,6 +818,9 @@ class BatteryWatchIn(BaseModel):
 def battery_watch_list():
     w, r = watch.watched(), watch.readings()
     names = {k: c.get("adv_name") for k, c in (radio.mc.contacts.items() if radio.mc else [])}
+    for x in r.values():    # readings stored under an older curve: recompute from the voltage
+        if x.get("v"):
+            x["pct"] = cell_pct(x["v"])
     return [{"public_key": k, "prefix": k[:12], "name": names.get(k) or k[:8], "below": v.get("below", 30),
              "has_password": v.get("password") is not None, "reading": r.get(k)} for k, v in w.items()]
 
