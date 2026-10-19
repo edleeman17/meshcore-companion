@@ -619,6 +619,10 @@ function msgHtml(m, reacts = null, fresh = new Set()) {
       : (m.kind === "dm" ? (() => { const lr = likelyRoute(m);
           return `<span class="chip chip-hops" title="${lr ? `Likely via ${esc(lr.join(" → "))} (your saved route to them, reversed)` : "Arrived on an established direct route — no flood path to count"}">via saved route${lr ? ` · ${hopsText(lr.length)}` : ""}</span>`; })() : ""))
     : "";
+  const again = m.repeats > 1
+    ? `<span class="chip" title="${m.kind === "dm"
+        ? `Their app sent this ${m.repeats} times because your delivery receipt didn't reach them`
+        : `Posted ${m.repeats} times`}">received ${m.repeats} times</span>` : "";
   const rtt = m.rtt_ms ? `<span>${(m.rtt_ms / 1000).toFixed(1)}s</span>` : "";
   const dmEcho = m.direction === "out" && m.kind === "dm" && m.status !== "delivered" && m.echoes != null
     ? `<span>${m.echoes ? `↺ repeated ×${m.echoes}` : "↺ not repeated yet"}</span>` : "";
@@ -651,7 +655,7 @@ function msgHtml(m, reacts = null, fresh = new Set()) {
     ? `<p class="hint-line">No repeater was heard carrying this, so it didn't get out. Resend.</p>` : "";
   const arrive = fresh.has(m.id) ? " arrive" : "";
   return `<div class="msg ${m.direction}${m.mention ? " mention" : ""}${m.hidden ? " is-hidden" : ""}${arrive}" data-id="${m.id}"><span class="swipe-ico" aria-hidden="true">↩</span>${who}<div class="text">${renderText(m.text)}</div>
-    ${reactsHtml(reacts, fresh, m.id)}<div class="foot">${dmBadges}${warn}${sig}${hops}${rtt}<span>${hhmm(m.ts)}</span>${m.kind === "chan" && m.direction === "out" ? echo : dmEcho + st}</div>${failHint}${chanHint}${resend}</div>`;
+    ${reactsHtml(reacts, fresh, m.id)}<div class="foot">${dmBadges}${warn}${again}${sig}${hops}${rtt}<span>${hhmm(m.ts)}</span>${m.kind === "chan" && m.direction === "out" ? echo : dmEcho + st}</div>${failHint}${chanHint}${resend}</div>`;
 }
 
 // The sheet slides away rather than vanishing. Every close goes through this,

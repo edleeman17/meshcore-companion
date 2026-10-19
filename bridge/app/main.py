@@ -49,6 +49,9 @@ if _dupe_pkts:
 _removed = db.dedupe_existing()
 if _removed:
     log.info("removed %d duplicate messages", _removed)
+_folded = db.collapse_resends()
+if _folded:
+    log.info("folded %d re-sent messages into their first copy", _folded)
 hub = Hub(db, VAPID_PRIVATE, VAPID_SUBJECT)
 radio = Radio(RADIO_ADDRESS, db, hub, RADIO_PIN, serial=RADIO_SERIAL, baud=RADIO_BAUD, host=RADIO_HOST)
 watch = radio.watch = Watch(radio, db, hub)

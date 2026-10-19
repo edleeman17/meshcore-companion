@@ -82,6 +82,10 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
+# A sender's app re-sends a DM (new clock) when our receipt doesn't reach it.
+RESEND_WINDOW_S = 300
+
+
 class DB:
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -93,7 +97,7 @@ class DB:
         for col, typ in (("echoes", "INTEGER"), ("echo_via", "TEXT"), ("path", "TEXT"),
                          ("path_names", "TEXT"), ("mention", "INTEGER"), ("hidden", "INTEGER"), ("warn", "TEXT"), ("verified", "INTEGER"),
                          ("signed", "TEXT"), ("signed_name", "TEXT"), ("signed_ok", "INTEGER"),
-                         ("key_state", "TEXT")):
+                         ("key_state", "TEXT"), ("repeats", "INTEGER")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE messages ADD COLUMN {col} {typ}")
         hcols = {r[1] for r in self.conn.execute("PRAGMA table_info(heard)")}
@@ -135,6 +139,39 @@ class DB:
             "AND text=? AND sender_ts=? AND ts>? LIMIT 1",
             (m["kind"], m["peer"], m.get("sender") or "", m["text"], m["sender_ts"], now_ms() - 86400_000))
         return rows[0] if rows else None
+
+    def find_resend(self, m: dict, window_s: int = RESEND_WINDOW_S) -> dict | None:
+        """The same text from the same sender again, a moment later, with a new sender
+        clock: their app re-sending because our receipt never reached them."""
+        if m.get("direction") != "in" or not m.get("text"):
+            return None
+        rows = self._rows(
+            "SELECT * FROM messages WHERE direction='in' AND kind=? AND peer=? AND COALESCE(sender,'')=? "
+            "AND text=? AND ts>? ORDER BY ts DESC LIMIT 1",
+            (m["kind"], m["peer"], m.get("sender") or "", m["text"], now_ms() - window_s * 1000))
+        return rows[0] if rows else None
+
+    def collapse_resends(self, window_s: int = RESEND_WINDOW_S) -> int:
+        """Fold re-sends already stored as separate messages into the first copy."""
+        kept: dict[tuple, dict] = {}
+        extra: list[int] = []
+        counts: dict[int, int] = {}
+        for r in self._rows("SELECT id, ts, kind, peer, sender, text, repeats FROM messages "
+                            "WHERE direction='in' ORDER BY ts"):
+            key = (r["kind"], r["peer"], r["sender"] or "", r["text"])
+            k = kept.get(key)
+            if k and r["ts"] - k["ts"] <= window_s * 1000:
+                extra.append(r["id"])
+                counts[k["id"]] = counts.get(k["id"], k["repeats"] or 1) + (r["repeats"] or 1)
+            else:
+                kept[key] = r
+        with self.lock:
+            for mid, n in counts.items():
+                self.conn.execute("UPDATE messages SET repeats=? WHERE id=?", (n, mid))
+            for i in range(0, len(extra), 500):
+                chunk = extra[i:i + 500]
+                self.conn.execute(f"DELETE FROM messages WHERE id IN ({','.join('?' * len(chunk))})", chunk)
+        return len(extra)
 
     def dedupe_packets(self) -> int:
         cur = self._exec("""DELETE FROM packets WHERE rowid NOT IN (

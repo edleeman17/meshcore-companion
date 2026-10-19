@@ -2,7 +2,7 @@
 // Caches are shared across the whole origin, so name them per scope: a /beta/
 // preview must never delete production's cache (or vice versa).
 const SCOPE = self.registration.scope;
-const SHELL = "mesh-v57@" + SCOPE;
+const SHELL = "mesh-v58@" + SCOPE;
 const isRoot = new URL(SCOPE).pathname === "/";
 // Relative to this worker, so the same build works at / and in a /beta/ preview.
 const FILES = ["./", "index.html", "app.js", "style.css", "manifest.webmanifest",

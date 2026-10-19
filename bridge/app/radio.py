@@ -596,6 +596,9 @@ class Radio:
                                    "sender": sender, "text": p.get("text", ""),
                                    "sender_ts": p.get("sender_timestamp")}):
             return
+        if await self._fold_resend({"direction": "in", "kind": "dm", "peer": p["pubkey_prefix"],
+                                    "sender": sender, "text": p.get("text", "")}):
+            return
         dm_path = p.get("path") or ""
         m = self.db.add_message(
             sender_ts=p.get("sender_timestamp"), direction="in", kind="dm",
@@ -608,6 +611,17 @@ class Radio:
         if self.watch:
             await self.watch.heard(key=p["pubkey_prefix"], how="sent you a message", snr=p.get("SNR"))
 
+    async def _fold_resend(self, m: dict) -> bool:
+        """A re-send of a message we already have: count it on the first copy."""
+        first = self.db.find_resend(m)
+        if not first:
+            return False
+        row = dict(self.db.update_message(first["id"], repeats=(first["repeats"] or 1) + 1))
+        if row["kind"] == "chan":
+            row["channel_name"] = self.channels.get(int(row["peer"]))
+        await self.hub.publish("message_update", row)
+        return True
+
     async def _on_chan(self, e):
         p = e.payload
         idx = p.get("channel_idx", 0)
@@ -617,6 +631,8 @@ class Radio:
             sender, body = None, text
         if self.db.find_duplicate({"direction": "in", "kind": "chan", "peer": str(idx), "sender": sender,
                                    "text": body, "sender_ts": p.get("sender_timestamp")}):
+            return
+        if await self._fold_resend({"direction": "in", "kind": "chan", "peer": str(idx), "sender": sender, "text": body}):
             return
         me = (self.mc.self_info.get("name") or "") if self.mc else ""
         path = p.get("path") or ""
