@@ -32,8 +32,8 @@ RADIO_HOST = os.environ.get("RADIO_HOST", "").strip()       # WiFi companion: ip
 RADIO_SERIAL = os.environ.get("RADIO_SERIAL", "").strip()
 RADIO_BAUD = int(os.environ.get("RADIO_BAUD", "115200"))
 RADIO_ADDRESS = os.environ.get("RADIO_ADDRESS", "").strip()
-if not (RADIO_SERIAL or RADIO_ADDRESS):
-    raise SystemExit("set RADIO_SERIAL (USB) or RADIO_ADDRESS (Bluetooth) in ~/.config/meshcore-bridge.env")
+if not (RADIO_HOST or RADIO_SERIAL or RADIO_ADDRESS):
+    raise SystemExit("set RADIO_HOST (WiFi), RADIO_SERIAL (USB) or RADIO_ADDRESS (Bluetooth) in ~/.config/meshcore-bridge.env")
 RADIO_PIN = os.environ.get("RADIO_PIN") or None    # unset = already bonded via bluetoothctl
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/var/lib/meshcore-bridge"))
 VAPID_PRIVATE = os.environ.get("VAPID_PRIVATE_KEY", "")
@@ -143,6 +143,90 @@ def read_mark(kind: str, peer: str):
     """The time (epoch ms) this conversation was last marked read — used to draw
     the 'new since you last read' divider before read advances on open."""
     return {"last_read": db.get_setting("read", {}).get(f"{kind}:{peer}", 0)}
+
+
+class SyncMsg(BaseModel):
+    direction: str
+    kind: str
+    peer: str
+    text: str
+    sender: str | None = None
+    ts: int | None = None
+    sender_ts: int | None = None
+    snr: float | None = None
+    path_len: int | None = None
+    status: str | None = None
+    rtt_ms: int | None = None
+
+
+class SyncIn(BaseModel):
+    messages: list[SyncMsg]
+
+
+SYNC_COLS = "id, ts, sender_ts, direction, kind, peer, sender, text, snr, path_len, status, rtt_ms"
+STATUS_RANK = {None: 0, "sending": 1, "sent": 2, "failed": 2, "delivered": 3}
+
+
+class MuteIn(BaseModel):
+    kind: str
+    peer: str
+    until: int | None = None    # epoch ms; 0 = until unmuted; null = unmute
+
+
+@app.post("/api/mute")
+def mute(body: MuteIn):
+    """Mute a conversation: its messages still arrive, without push or a place in the badge."""
+    db.set_muted(body.kind, body.peer, body.until)
+    return {"muted_until": db.muted().get(f"{body.kind}:{body.peer}"), "badge": db.unread_total()}
+
+
+@app.get("/api/sync/messages")
+def sync_messages(after: int = 0, limit: int = 500):
+    """Messages after an id, oldest first, for another app keeping its own copy (tools/tui-sync.py)."""
+    return db._rows(f"SELECT {SYNC_COLS} FROM messages WHERE id>? AND COALESCE(hidden,0)=0 ORDER BY id LIMIT ?",
+                    (after, min(limit, 2000)))
+
+
+@app.post("/api/sync/messages")
+async def sync_add(body: SyncIn):
+    """Messages another app on the same radio sent or heard. A copy we already have is
+    matched (same text with a sender clock within five minutes, as a retry gets a new one, or an outgoing
+    one within two minutes) and only
+    its delivery status moves forward; anything new is stored and shown, without a push."""
+    added = updated = 0
+    for m in body.messages:
+        if m.sender_ts:
+            same = db._rows("SELECT id, status FROM messages WHERE kind=? AND peer=? AND direction=? AND text=? "
+                            "AND ABS(sender_ts-?)<=300 LIMIT 1", (m.kind, m.peer, m.direction, m.text, m.sender_ts))
+        else:
+            ts = m.ts or now_ms()
+            same = db._rows("SELECT id, status FROM messages WHERE kind=? AND peer=? AND direction=? AND text=? "
+                            "AND ts BETWEEN ? AND ? LIMIT 1", (m.kind, m.peer, m.direction, m.text, ts - 120_000, ts + 120_000))
+        if same:
+            if m.direction == "out" and STATUS_RANK.get(m.status, 0) > STATUS_RANK.get(same[0]["status"], 0):
+                await hub.publish("message", db.update_message(same[0]["id"], status=m.status))
+                updated += 1
+            continue
+        row = db.add_message(**{k: v for k, v in m.model_dump().items() if v is not None})
+        await hub.publish("message", row)
+        added += 1
+    return {"added": added, "updated": updated}
+
+
+@app.get("/api/sync/reads")
+def sync_reads():
+    return db.get_setting("read", {})
+
+
+@app.post("/api/sync/reads")
+def sync_reads_set(body: dict[str, int]):
+    """Read marks from another app ("kind:peer" -> epoch ms); each only ever moves forward."""
+    read = db.get_setting("read", {})
+    for k, v in body.items():
+        if v > read.get(k, 0):
+            read[k] = v
+    db.set_setting("read", read)
+    return {"badge": db.unread_total()}
 
 
 @app.get("/api/search")
@@ -1058,7 +1142,11 @@ def topology_view(hours: float = 24):
 async def packet_log(type: str | None = None, before: int | None = None, limit: int = 100):
     """Stored frames, newest first, for the packet inspector list."""
     rows = db.packet_log(type or None, before, min(max(limit, 1), 500))
+    keys = radio.inspect_keys() if limit <= 50 else None   # a short list (the live log) also says what each one was
     for r in rows:
+        if keys is not None and r.get("has_raw"):
+            raw = (db.packet(r["id"]) or {}).get("raw")
+            r["summary"] = radio.inspect_packet(raw, keys).get("summary") if raw else None
         path, n = r.get("path") or "", r.get("path_len") or 0
         size = len(path) // (2 * n) if n and r.get("ptype") != "TRACE" else 1
         if r.get("ptype") == "TRACE":   # a trace's path holds SNRs, not hops
@@ -1076,6 +1164,11 @@ async def packet_detail(pid: int):
     d = radio.inspect_packet(p["raw"]) if p.get("raw") else {"fields": [], "summary": "raw bytes not kept for this packet"}
     meta = {k: p[k] for k in ("id", "ts", "snr", "rssi", "route", "ptype", "path_len", "path", "size")}
     return {**meta, **d}
+
+
+def _hops(path: str, size: int) -> set[str]:
+    """The distinct repeaters on a path: its hex cut into size-byte hashes."""
+    return {path[i:i + 2 * size] for i in range(0, len(path), 2 * size)}
 
 
 @app.get("/api/stats")
@@ -1161,8 +1254,40 @@ def stats(range: str = "24h"):
               "noise_floor": last.get("radio", {}).get("noise_floor"),
               "tx_pct_last_hour": next((h["tx_pct"] for h in reversed(hourly) if h["tx_pct"] is not None), None)}
 
+    # "The mesh, from what we've heard": who carries the traffic, how far it travels,
+    # how well it arrives and where people talk. One more pass over the same packets.
+    carried: dict[str, int] = {}
+    snr_buckets = [0] * 6                    # <-10, -10..-5, -5..0, 0..5, 5..10, 10+
+    adverts: dict[int, int] = {}
+    with_path = 0
+    for p in pkts:
+        path, n = p["path"] or "", p["path_len"] or 0
+        if path and n:
+            with_path += 1
+            size = max(1, len(path) // (2 * n))
+            for hop in _hops(path, size):
+                carried[hop] = carried.get(hop, 0) + 1
+        if p["snr"] is not None:
+            snr_buckets[min(5, max(0, int((p["snr"] + 15) // 5)))] += 1
+        if p["ptype"] == "ADVERT" and p["ts"] >= now_ms() - 8 * hour:
+            adverts[p["ts"] // hour * hour] = adverts.get(p["ts"] // hour * hour, 0) + 1
+    busiest = []
+    for hop, c in sorted(carried.items(), key=lambda kv: -kv[1])[:8]:
+        busiest.append({"hop": hop, "name": radio.hop_name(hop), "count": c,
+                        "pct": round(100 * c / with_path) if with_path else 0})
+    chan_counts = db._rows("SELECT peer, COUNT(*) AS n FROM messages WHERE kind='chan' AND ts>=? "
+                           "AND COALESCE(hidden,0)=0 GROUP BY peer ORDER BY n DESC LIMIT 8", (since,))
+    overview = {
+        "busiest": busiest,
+        "snr_buckets": snr_buckets,
+        "adverts_per_hour": [{"ts": ts, "count": c} for ts, c in sorted(adverts.items())],
+        "channels": [{"peer": r["peer"], "name": radio.channels.get(int(r["peer"])), "count": r["n"]} for r in chan_counts],
+        "packets": len(pkts),
+    }
+
     return {
         "health": health,
+        "overview": overview,
         "hourly": hourly,
         "samples": samples,
         "packets": [{k: p[k] for k in ("ts", "snr", "rssi", "ptype", "path_len")} for p in pkts[:2000]],

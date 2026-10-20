@@ -1,0 +1,18 @@
+# Keeps meshcore-tui's history in step with the bridge (tools/tui-sync.py). Install on the
+# machine that runs meshcore-tui:
+#   cp tools/tui-sync.py ~/.local/bin/ && cp tools/meshcore-tui-sync.service ~/.config/systemd/user/
+#   echo BRIDGE=http://<bridge host>:8190 > ~/.config/meshcore-tui-sync.env
+#   systemctl --user enable --now meshcore-tui-sync
+[Unit]
+Description=Sync meshcore-tui history with the MeshCore Companion bridge
+After=network-online.target
+
+[Service]
+EnvironmentFile=%h/.config/meshcore-tui-sync.env
+ExecStart=/usr/bin/python3 -u %h/.local/bin/tui-sync.py
+Restart=always
+RestartSec=10
+MemoryMax=60M
+
+[Install]
+WantedBy=default.target

@@ -259,14 +259,18 @@ class Radio:
             return who
         return None
 
-    def inspect_packet(self, raw_hex: str) -> dict:
-        """Decode a stored frame, decrypting channel traffic with every key we know."""
+    def inspect_keys(self) -> list[tuple[str, bytes]]:
+        """Every channel key we know: the radio's channels, Public and #hashtags found on air."""
         keys = list(self.chan_keys.items())
         keys.append(("Public", bytes.fromhex("8b3387e9c5cdea6ac9e5edbaa115cd72")))
-        for row in self.db.chan_seen_all():   # #hashtag channels found on air
+        for row in self.db.chan_seen_all():
             if row.get("name"):
                 keys.append((row["name"], discover.key_for(row["name"])))
-        out = inspect.decode(raw_hex, keys, self.hop_name)
+        return keys
+
+    def inspect_packet(self, raw_hex: str, keys: list | None = None) -> dict:
+        """Decode a stored frame, decrypting channel traffic with every key we know."""
+        out = inspect.decode(raw_hex, keys if keys is not None else self.inspect_keys(), self.hop_name)
         sig = out.get("signature")
         if sig and self.mc:
             me = (self.mc.self_info or {}).get("public_key") or ""
@@ -663,6 +667,26 @@ class Radio:
             await self.hub.publish("hidden", {"kind": "chan", "peer": str(idx)})
             return
         await self.hub.publish("message", m, notify=True)
+        if sender and not m.get("signed"):
+            asyncio.create_task(self._check_usually_signs(m))
+
+    async def _check_usually_signs(self, m: dict):
+        """An unsigned post under a pinned name that normally signs is flagged, so someone
+        posting as them can't get by just leaving the signature off. The signature rides
+        in its own packet, so give it 30 s to turn up first."""
+        await asyncio.sleep(30)
+        if not self.db.get_setting("pinned_keys", {}).get(m["sender"]):
+            return
+        now = self.db._rows("SELECT signed FROM messages WHERE id=?", (m["id"],))
+        if not now or now[0]["signed"]:
+            return
+        recent = self.db._rows("SELECT signed_ok FROM messages WHERE kind='chan' AND direction='in' AND sender=? "
+                               "AND id<? ORDER BY id DESC LIMIT 5", (m["sender"], m["id"]))
+        if sum(1 for r in recent if r["signed_ok"] == 1) < 3:
+            return
+        row = dict(self.db.update_message(m["id"], key_state="unsigned_usual"))
+        row["channel_name"] = self.channels.get(int(m["peer"]))
+        await self.hub.publish("message_update", row)
 
     async def _on_rx(self, e):
         p = dict(e.payload)
@@ -734,6 +758,9 @@ class Radio:
             "adv_key": p.get("adv_key") if p.get("payload_type") == 4 else None,
             "sender": (p.get("message") or "").split(": ", 1)[0] if ": " in (p.get("message") or "") else None,
             "heard_from": self.hop_name(last_hop) if last_hop else (hop_name or "direct"),
+            # for the app's live ticker: what it says (readable channel posts, advert names) and its first bytes
+            "text": (p.get("message") or p.get("adv_name") or "")[:100] or None,
+            "raw": (raw or "")[:96] or None,
         })
 
     def _origin_warning(self, peer: str, sender: str | None, path: str, path_len) -> str | None:

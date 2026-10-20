@@ -26,12 +26,17 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+<!-- Radio at a glance: name, link, preset, battery, noise and airtime, always on show -->
+<div id="strip" class="strip" role="status" aria-label="Radio status"><span class="pill" id="conn" title="Radio link">…</span><span class="strip-view"><span id="strip-body"></span></span></div>
 <header class="top">
   <button class="back" id="back" hidden aria-label="Back">‹</button>
   <h1 id="title">MeshCore</h1>
+  <button class="hdr-btn" id="mute-btn" hidden aria-label="Mute this chat" title="Mute this chat"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a2 2 0 0 0 3.4 0"/></svg></button>
   <button class="hdr-btn" id="info" hidden aria-label="Details">ⓘ</button>
-  <span class="pill" id="conn" title="Radio link" role="status">…</span>
+  <button class="hdr-btn" id="find-btn" aria-label="Go anywhere" title="Go anywhere (Ctrl+K)"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></button>
 </header>
+<!-- Latest thing the radio heard: under the header on Chats (phones), along the bottom on desktop -->
+<button type="button" id="ticker" class="ticker" hidden aria-label="Latest packet — open Live packets"><span class="tk-line" id="tk-line"></span><span class="tk-hex" id="tk-hex"></span></button>
 
 <div id="offline" class="banner" hidden role="alert"></div>
 <main>
@@ -87,9 +92,10 @@
 
   <!-- Contacts -->
   <section id="v-contacts" class="view" hidden>
-    <div class="row-actions">
-      <button id="scan-qr" class="btn primary">Scan QR code</button>
-      <button id="my-qr" class="btn">My QR code</button>
+    <div class="row-actions btn-row">
+      <button id="scan-qr" class="btn sm primary">Scan QR code</button>
+      <button id="my-qr" class="btn sm">My QR code</button>
+      <button id="my-uri-top" class="btn sm">Share my link</button>
     </div>
     <h2 class="sub">Your contacts <small id="contact-count"></small></h2>
     <div class="contact-tools">
@@ -99,13 +105,9 @@
       </div>
     </div>
     <div id="contact-list" class="list"></div>
-    <h2 class="sub">Nearby now <small id="nearby-note"></small></h2>
+    <h2 class="sub">Heard, not saved <small id="nearby-note"></small></h2>
     <div class="seg" id="nearby-range"><button data-h="1" class="on">1h</button><button data-h="24">24h</button></div>
     <div id="nearby" class="list"></div>
-    <div id="pending-wrap" hidden>
-      <h2 class="sub">Heard adverts <small>not yet contacts</small></h2>
-      <div id="pending" class="list"></div>
-    </div>
     <details class="fold">
       <summary>Add or share a contact</summary>
       <form id="import" class="inline">
@@ -129,8 +131,7 @@
   <section id="v-contact" class="view" hidden>
     <div id="c-hero" class="hero"></div>
     <div class="actions" id="c-actions"></div>
-    <dl class="kv" id="c-kv"></dl>
-    <h2 class="sub">Diagnostics</h2>
+    <div class="ov-tiles c-tiles" id="c-kv"></div>
     <div class="actions" id="c-diag"></div>
     <div id="c-out" class="result" hidden></div>
     <div id="c-bw"></div>
@@ -184,11 +185,12 @@
   <section id="v-signal" class="view" hidden>
     <div class="sub-home">
       <div id="health"></div>
+      <div id="overview" class="overview"></div>
       <nav class="menu" aria-label="Signal">
-        <a href="#/placement"><span aria-hidden="true">📍</span><span><b>Placement mode</b><small>Live signal to every repeater, to find the best antenna spot</small></span></a>
-        <a href="#/signal/charts"><span aria-hidden="true">📈</span><span><b>Charts</b><small>SNR, errors, airtime, noise floor</small></span></a>
-        <a href="#/signal/heard"><span aria-hidden="true">📡</span><span><b>Who you hear</b><small>Last-hop repeaters and hop counts</small></span></a>
-        <a href="#/signal/packets"><span aria-hidden="true">🔎</span><span><b>Live packets</b><small>Every packet as it arrives, with the inspector</small></span></a>
+        <a href="#/placement"><span><b>Placement mode</b><small>Live signal to every repeater, to find the best antenna spot</small></span><span class="mv" data-mv="placement"></span></a>
+        <a href="#/signal/charts"><span><b>Charts</b><small>SNR, errors, airtime, noise floor</small></span><span class="mv" data-mv="charts"></span></a>
+        <a href="#/signal/heard"><span><b>Who you hear</b><small>Last-hop repeaters and hop counts</small></span><span class="mv" data-mv="heard"></span></a>
+        <a href="#/signal/packets"><span><b>Live packets</b><small>Every packet as it arrives, with the inspector</small></span><span class="mv" data-mv="packets"></span></a>
       </nav>
     </div>
     <div class="subpage" data-sub="charts" data-title="Charts" hidden>
@@ -196,23 +198,23 @@
         <button data-r="1h">1h</button><button data-r="6h">6h</button><button data-r="24h" class="on">24h</button><button data-r="7d">7d</button>
       </div></div>
     <div class="chart-grid">
-      <div class="chart-card"><h2 class="sub">Best repeater SNR <small>hourly average</small></h2>
+      <div class="chart-card"><h2 class="sub">Best repeater SNR <small>hourly average</small><span class="now" id="now-trend"></span></h2>
         <div class="chart" id="c-trend"></div></div>
-      <div class="chart-card"><h2 class="sub">Packets lost to errors <small>% per hour</small></h2>
+      <div class="chart-card"><h2 class="sub">Packets lost to errors <small>% per hour</small><span class="now" id="now-err"></span></h2>
         <div class="chart" id="c-err"></div></div>
-      <div class="chart-card"><h2 class="sub">Your airtime <small>% of each hour · duty-cycle limit 10%</small></h2>
+      <div class="chart-card"><h2 class="sub">Your airtime <small>% of each hour · duty-cycle limit 10%</small><span class="now" id="now-air"></span></h2>
         <div class="chart" id="c-air"></div></div>
       <div class="chart-card"><h2 class="sub">Packet SNR / RSSI</h2>
         <div class="chart" id="c-pkts"></div></div>
-      <div class="chart-card"><h2 class="sub">Noise floor</h2>
+      <div class="chart-card"><h2 class="sub">Noise floor<span class="now" id="now-noise"></span></h2>
         <div class="chart" id="c-noise"></div></div>
     </div>
     </div>
     <div class="subpage" data-sub="heard" data-title="Who you hear" hidden>
       <div class="range-slot"></div>
-    <div class="scroll-x"><table class="tbl" id="neigh"><thead><tr><th>Node</th><th>Pkts</th><th>SNR</th><th>RSSI</th><th>Last</th></tr></thead><tbody></tbody></table></div>
-    <h2 class="sub">Hops</h2>
-    <div id="hops" class="hops"></div>
+    <div id="neigh" class="heard-list"></div>
+    <h2 class="sub">Hops travelled</h2>
+    <div id="hops"></div>
     </div>
     <div class="subpage" data-sub="packets" data-title="Live packets" hidden>
     <p class="hint">Tap a packet to look inside it.</p>
@@ -222,23 +224,22 @@
       </div>
       <button class="btn sm" id="pkt-pause" aria-pressed="false">Pause</button>
     </div>
-    <div class="scroll-x"><table class="tbl" id="live"><thead><tr><th>Time</th><th>Type</th><th>SNR</th><th>RSSI</th><th>Via</th></tr></thead>
-      <tbody><tr class="empty-row"><td colspan="5" class="empty">Waiting for packets…</td></tr></tbody></table></div>
+    <div id="live" class="pkt-list" aria-live="off"><p class="empty empty-row">Waiting for packets…</p></div>
     </div>
   </section>
 
   <!-- Radio -->
   <section id="v-radio" class="view" hidden>
     <div class="sub-home">
-    <div id="kv" class="stats"></div>
+    <div id="kv" class="ov-tiles radio-tiles"></div>
       <nav class="menu" aria-label="Radio">
-        <a href="#/radio/battery"><span aria-hidden="true">🔋</span><span><b>Battery</b><small>Charge history</small></span></a>
-        <a href="#/radio/settings"><span aria-hidden="true">⚙️</span><span><b>Radio settings</b><small>Name, TX power, location, contacts, PIN</small></span></a>
-        <a href="#/radio/notify"><span aria-hidden="true">🔔</span><span><b>Notifications</b><small>Channels, offline and back-in-range alerts</small></span></a>
-        <a href="#/radio/batteries"><span aria-hidden="true">🪫</span><span><b>Repeater batteries</b><small>Watched repeaters, checked every 3 hours</small></span></a>
-        <a href="#/radio/filters"><span aria-hidden="true">🚫</span><span><b>Spam filters</b><small>Hide senders, text and bot floods</small></span></a>
-        <a href="#/radio/appearance"><span aria-hidden="true">🎨</span><span><b>Appearance</b><small>Colour theme, light or dark</small></span></a>
-        <a href="#/radio/maintenance"><span aria-hidden="true">🛠️</span><span><b>Maintenance</b><small>Adverts and reboot</small></span></a>
+        <a href="#/radio/battery"><span><b>Battery</b><small>Charge history</small></span><span class="mv" data-mv="battery"></span></a>
+        <a href="#/radio/settings"><span><b>Radio settings</b><small>Name, TX power, location, contacts, PIN</small></span><span class="mv" data-mv="settings"></span></a>
+        <a href="#/radio/notify"><span><b>Notifications</b><small>Channels, offline and back-in-range alerts</small></span><span class="mv" data-mv="notify"></span></a>
+        <a href="#/radio/batteries"><span><b>Repeater batteries</b><small>Watched repeaters, checked every 3 hours</small></span><span class="mv" data-mv="batteries"></span></a>
+        <a href="#/radio/filters"><span><b>Spam filters</b><small>Hide senders, text and bot floods</small></span><span class="mv" data-mv="filters"></span></a>
+        <a href="#/radio/appearance"><span><b>Appearance</b><small>Colour theme, light or dark</small></span><span class="mv" data-mv="appearance"></span></a>
+        <a href="#/radio/maintenance"><span><b>Maintenance</b><small>Adverts and reboot</small></span><span class="mv" data-mv="maintenance"></span></a>
       </nav>
     </div>
     <div class="subpage" data-sub="battery" data-title="Battery" hidden>
@@ -345,6 +346,13 @@
   </section>
 </main>
 
+<dialog id="finder" class="finder" aria-label="Go anywhere">
+  <div class="fd-box"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+    <input id="fd-q" type="search" placeholder="Chats, people, repeaters, pages, themes…" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Go anywhere" aria-controls="fd-list" aria-autocomplete="list">
+    <kbd>esc</kbd></div>
+  <div id="fd-list" class="fd-list" role="listbox"></div>
+  <p class="fd-foot">↑↓ to pick · enter opens · type a theme name to switch</p>
+</dialog>
 <dialog id="sheet" aria-labelledby="sheet-title"><div id="sheet-body"></div><form method="dialog"><button class="btn close">Close</button></form></dialog>
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 

@@ -32,6 +32,12 @@ A self-hosted web app for your [MeshCore](https://meshcore.io) LoRa radio. A sma
 
 ## Features
 
+**New: 📟 Every number on screen** — a status strip along the top shows your radio at a glance (name, preset, battery, noise floor, airtime; model, firmware, TX power and receive errors too on a desktop), and a live ticker shows the last packet heard with its first bytes (under the header on Chats, along the bottom on a desktop; tap it for Live packets). Every message is now a row of data: time, sender and signature, then how it travelled (hops, the repeaters it came through, SNR, RSSI, copies, delivery). Chats show the same for their last message. Signal opens on an **overview**: this radio's last hour, the busiest repeaters by share of paths, hops travelled, the SNR of every copy heard, and the busiest channels.
+
+**New: 🔍 Go anywhere** — `Ctrl`/`⌘`+`K` (or the 🔍 in the header) finds any chat, person, repeater, page, action or theme as you type; typing a `#name` you're not in offers to join it. **🔕 Mute** a chat for 1 hour, 8 hours, a week or for good: its messages still arrive, without notifications or a place in the badge. A `#channel` named in a message opens it, or offers **Join**. And a post under a pinned name that usually signs, arriving without a signature, is flagged **⚠ unsigned · usually signs**, so an impersonator can't get by just leaving the signature off.
+
+**🖥️ meshcore-tui on the same radio** — `bridge/mux.py` shares a WiFi radio between the bridge and other apps such as [meshcore-tui](https://github.com/verdantran/meshcore-tui), and `tools/tui-sync.py` keeps the TUI's history, delivery status and read marks in step with the bridge.
+
 **New: 👍 Reactions and swipe to reply** — hold a message (or right-click it) to react with 👍 ❤️ 😂 😮 😢 🙏, reply, copy or open its details; swipe a message right to reply. MeshCore has no reaction packet, so a reaction goes out as an ordinary short message any client can read (`@[Alice] 👍` in a channel, `👍` in a DM, with a short `"quote…"` added when it's for an older message) and this app folds it under the message it's for. The same emoji from several people shows a count (each person counts once), and tapping a reaction shows who sent it and when. Replying in a channel starts your post with `@[Name] ` so they get a mention; the "replying to" quote stays on your screen and costs no bytes.
 
 **New: ✨ Screens that slide** — on phones, opening a chat or a settings page slides it in over the last one and Back slides it away, like a native app (Safari 18+, Chrome 111+); tabs swap with a short slide while the highlight glides across. Recently opened chats appear instantly, and messages start loading as soon as your finger touches a chat. Sheets and toasts animate out too. All of it is off with the system's reduce-motion setting.
@@ -374,6 +380,7 @@ Everything stays on your own machines. The bridge stores messages, packet metada
 ## Credits
 
 - [MeshCore](https://meshcore.io) ([source](https://github.com/meshcore-dev/MeshCore)) and [meshcore_py](https://github.com/meshcore-dev/meshcore_py), which do the hard work.
+- [meshcore-tui](https://github.com/verdantran/meshcore-tui) (MIT), whose dense screens inspired this redesign; the Go-anywhere finder's scoring follows its finder.
 - [uPlot](https://github.com/leeoniya/uPlot) (MIT) and [Leaflet](https://leafletjs.com) (BSD-2), bundled in `pwa/static/vendor/`.
 
 ## License

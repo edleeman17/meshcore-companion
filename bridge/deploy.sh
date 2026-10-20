@@ -19,7 +19,7 @@ elif [ -n "$RADIO_SERIAL" ]; then CONN="RADIO_SERIAL=$RADIO_SERIAL"; else CONN="
 VAPID_SUBJECT=${VAPID_SUBJECT:-mailto:admin@example.com}
 
 ssh "$HOST" 'mkdir -p ~/meshcore-bridge ~/.local/share/meshcore-bridge ~/.config/systemd/user'
-rsync -a --delete --exclude __pycache__ --exclude venv app requirements.txt backup.sh pair.sh "$HOST":meshcore-bridge/
+rsync -a --delete --exclude __pycache__ --exclude venv app requirements.txt backup.sh pair.sh mux.py "$HOST":meshcore-bridge/
 rsync -a --delete ../pwa/static/ "$HOST":meshcore-bridge/pwa/   # the bridge serves the web app too
 ssh "$HOST" 'cd ~/meshcore-bridge && { [ -d venv ] || python3 -m venv venv; } && venv/bin/pip -q install -r requirements.txt'
 
@@ -49,7 +49,9 @@ if [ -n "${BACKUP_DIR:-}" ]; then
   ssh "$HOST" "grep -q '^BACKUP_DIR=' ~/.config/meshcore-bridge.env || echo 'BACKUP_DIR=$BACKUP_DIR' >> ~/.config/meshcore-bridge.env"
 fi
 
-scp -q meshcore-bridge.service meshcore-backup.service meshcore-backup.timer "$HOST":.config/systemd/user/
+scp -q meshcore-bridge.service meshcore-mux.service meshcore-backup.service meshcore-backup.timer "$HOST":.config/systemd/user/
 ssh "$HOST" 'systemctl --user daemon-reload && systemctl --user enable -q meshcore-bridge && systemctl --user enable -q --now meshcore-backup.timer && systemctl --user restart meshcore-bridge'
+# a radio shared through mux.py (MUX_RADIO set in the env file): keep the mux running too
+ssh "$HOST" 'grep -q "^MUX_RADIO=" ~/.config/meshcore-bridge.env && systemctl --user enable -q meshcore-mux && systemctl --user restart meshcore-mux || true'
 sleep 10
 ssh "$HOST" 'systemctl --user is-active meshcore-bridge; curl -s localhost:8190/health; echo'

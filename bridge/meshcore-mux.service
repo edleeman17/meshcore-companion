@@ -1,0 +1,20 @@
+# Shares a WiFi companion radio between the bridge and other apps (meshcore-tui,
+# the MeshCore CLI). Set MUX_RADIO=<radio ip> and RADIO_HOST=127.0.0.1:5001 in
+# ~/.config/meshcore-bridge.env; other apps then connect to this host's port 5001.
+# Installed to ~/.config/systemd/user/ by deploy.sh.
+[Unit]
+Description=MeshCore radio multiplexer (one WiFi radio, many apps)
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/meshcore-bridge
+EnvironmentFile=%h/.config/meshcore-bridge.env
+ExecStart=/usr/bin/python3 -u mux.py
+StandardOutput=append:%h/.local/share/meshcore-bridge/mux.log
+StandardError=inherit
+Restart=always
+RestartSec=3
+MemoryMax=50M
+
+[Install]
+WantedBy=default.target

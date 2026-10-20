@@ -38,6 +38,11 @@ const snrGrade = (snr) => snr == null ? { cls: "", word: "", leg: "wait" }
 const qClass = (snr) => snrGrade(snr).cls;
 const qWord = (snr) => snrGrade(snr).word;
 const hopsText = (n) => n == null ? "" : n === 0 ? "direct" : `${n} hop${n === 1 ? "" : "s"}`;
+// SNR as coloured text on the data lines (q-good-t / q-ok-t / q-bad-t).
+const snrT = (snr) => snr == null ? "" : (snrGrade(snr).cls || "q") + "-t";
+// A route as names, kept short: "A → B → C → D" becomes "A … D".
+const shortVia = (names) => { const n = String(names || "").split(/\s*→\s*/).filter(Boolean); return n.length > 2 ? `${n[0]} … ${n.at(-1)}` : n.join(" → "); };
+const muteIco = `<svg class="mute-ico" viewBox="0 0 24 24" role="img" aria-label="muted"><path d="M6 8a6 6 0 0 1 9.3-5M18 8c0 7 3 9 3 9H9M13.7 21a2 2 0 0 1-3.4 0M3 3l18 18"/></svg>`;
 const TYPES = { 1: "person", 2: "repeater", 3: "room", 4: "sensor" };
 // First visible character of a name, emoji-safe ("📡basecamp" → "📡", not half a surrogate pair).
 const seg = typeof Intl !== "undefined" && Intl.Segmenter ? new Intl.Segmenter() : null;
@@ -224,6 +229,8 @@ function go(still = false) {
   document.querySelectorAll(".tabs a").forEach((a) => a.classList.toggle("on", a.dataset.tab === tab));
   $("#back").hidden = !(["dm", "chan", "contact", "placement"].includes(parts[0]) || (["signal", "radio"].includes(parts[0]) && parts[1])) || split;
   $("#info").hidden = !["dm", "chan"].includes(parts[0]);
+  $("#mute-btn").hidden = !["dm", "chan"].includes(parts[0]);
+  $("#finder").open && $("#finder").close();
   $("#thread-info").hidden = true;
   document.body.classList.toggle("in-thread", ["dm", "chan"].includes(parts[0]));
   document.body.classList.toggle("in-map", tab === "map");
@@ -250,6 +257,7 @@ function go(still = false) {
   else if (tab === "signal") { showSub("signal", parts[1]); loadStats(); if (parts[1] === "packets") loadPackets(); }
   else if (tab === "radio") { showSub("radio", parts[1]); renderRadio(); fillSettings(); fillFilters(); loadStats(); renderBatteryList(); }
   else if (!split) { $("#v-chats").hidden = false; $("#title").textContent = "MeshCore"; loadConvs(); }
+  syncMuteBtn(); showTicker();
   animateNav(from, parts, before);
 }
 // Signal and Radio open on a short menu; each feature is its own page (#/signal/charts).
@@ -331,13 +339,29 @@ function lastLine(c) {
     : `<span class="by tint"${tint(who)}>${esc(who)}${r ? "" : ":"}</span> `;
   return by + (r ? `${who ? "reacted" : "Reacted"} ${esc(r.emoji)}` : esc(c.last_text));
 }
+// The data line under a chat: how its last message travelled, or how yours went out.
+function convMeta(c) {
+  const m = c.last_meta; if (!m) return "";
+  if (c.last_dir === "out") {
+    if (m.status === "delivered") return `<span class="q-good-t">✓ delivered</span>`;
+    if (m.status === "failed") return `<span class="q-bad-t">✗ ${m.echoes ? "no receipt" : "not sent"}</span>`;
+    if (m.echoes) return `<span class="q-good-t">✓ on mesh · ↺ ×${m.echoes}</span>`;
+    return m.status === "sending" ? "sending…" : "sent";
+  }
+  const bits = [];
+  if (m.path_len != null) bits.push(m.path_len === 0 ? "direct" : hopsText(m.path_len) + (m.path_names ? ` via ${esc(shortVia(m.path_names))}` : ""));
+  if (m.snr != null) bits.push(`<span class="${snrT(m.snr)}">SNR ${fmtDb(m.snr)}</span>`);
+  return bits.join(" · ");
+}
 const convRow = (c) => {
   const name = c.kind === "chan" ? chanName(c.peer) : c.name || contactName(c.peer);
-  const unread = c.unread ? ` unread` : "";
+  const muted = c.muted_until != null;
+  const cls = (c.unread ? " unread" : "") + (muted ? " muted-conv" : "");
   const cur = S.route[0] === c.kind && S.route[1] === c.peer ? ` aria-current="true"` : "";
-  return `<a href="#/${c.kind}/${esc(c.peer)}" class="${unread}"${cur}>
+  const meta = convMeta(c);
+  return `<a href="#/${c.kind}/${esc(c.peer)}" class="${cls.trim()}"${cur}>
     ${c.kind === "chan" ? `<span class="badge chan">#</span>` : `<span class="badge tint"${tint(name)}>${esc(initial(name)) + presenceDot(contactByPrefix(c.peer))}</span>`}
-    <span class="meta"><div class="name">${esc(name)}</div><div class="last">${lastLine(c)}</div></span>
+    <span class="meta"><div class="name">${esc(name)}${muted ? muteIco : ""}</div><div class="last">${lastLine(c)}</div>${meta ? `<div class="row-meta">${meta}</div>` : ""}</span>
     <span class="when">${c.last_ts ? ago(c.last_ts) : ""}${c.mentions || c.unread ? `<span class="marks">${c.mentions ? '<span class="at" title="You were mentioned">@</span>' : ""}${c.unread ? `<span class="count-badge">${c.unread}</span>` : ""}</span>` : ""}</span></a>`;
 };
 
@@ -348,7 +372,8 @@ async function loadConvs() {
     return;
   }
   const notify = new Set(S.state?.notify_channels || []);
-  setBadge(S.convs.reduce((n, c) => n + (c.kind === "dm" || notify.has(c.peer) ? c.unread : c.mentions), 0));
+  setBadge(S.convs.reduce((n, c) => n + (c.muted_until != null ? 0 : c.kind === "dm" || notify.has(c.peer) ? c.unread : c.mentions), 0));
+  syncMuteBtn();
   const seen = new Set(S.convs.map((c) => `${c.kind}:${c.peer}`));
   // Unread conversations first, then newest first.
   const isUnread = (c) => c.unread > 0 || c.mentions > 0 ? 1 : 0;
@@ -564,12 +589,27 @@ function reactionDetails(msgId, first) {
 
 // Inline contact cards people paste in chat: <64-hex pubkey:type:name>
 const CARD_RE = /&lt;([0-9a-fA-F]{64}):([1-4]):([^&]{1,32}?)&gt;/g;
-function renderText(t) {
-  return esc(t).replace(CARD_RE, (_, key, type, name) => {
-    const known = S.contacts.some((c) => c.public_key === key.toLowerCase());
-    return `<span class="card-chip" data-card-key="${key}" data-card-type="${type}" data-card-name="${name}">
+const cardHtml = ([, key, type, name]) => {
+  const known = S.contacts.some((c) => c.public_key === key.toLowerCase());
+  return `<span class="card-chip" data-card-key="${key}" data-card-type="${type}" data-card-name="${name}">
       👤 ${name} <span class="tag">${TYPES[type] || ""}</span> ${known ? "<b>✓ in contacts</b>" : "<button>Add</button>"}</span>`;
+};
+// "#name" in a message: a link when you're in that channel, else a Join button.
+const HASHTAG_RE = /(^|[\s(,;:!?])#([\p{L}\p{N}_-]{2,30})/gu;
+function tagChannels(html) {
+  const mine = new Map(Object.entries(S.state?.channels || {}).map(([i, n]) => [n.toLowerCase(), i]));
+  return html.replace(HASHTAG_RE, (all, pre, name) => {
+    const tag = "#" + name, idx = mine.get(tag.toLowerCase());
+    return pre + (idx != null ? `<a class="chan-link" href="#/chan/${idx}">${tag}</a>`
+      : `<button type="button" class="join-chan" data-join-chan="${tag}" title="Join ${tag}">${tag} · Join</button>`);
   });
+}
+function renderText(t) {
+  const s = esc(t), out = [];
+  let at = 0;
+  for (const m of s.matchAll(CARD_RE)) { out.push(tagChannels(s.slice(at, m.index)), cardHtml(m)); at = m.index + m[0].length; }
+  out.push(tagChannels(s.slice(at)));
+  return out.join("");
 }
 
 function dmStatusTip(m) {
@@ -593,6 +633,7 @@ function chanStatusTip(m) {
 // anti-spoof part is key_state (match = key you pinned for this name, changed =
 // a DIFFERENT key, the spoof alarm).
 function signedChip(m) {
+  if (m.key_state === "unsigned_usual") return ` <span class="chip q-ok" title="${esc(m.sender)} usually signs, and you pinned their key, but this post came with no signature. It may not be them.">⚠ unsigned · usually signs</span>`;
   if (!m.signed) return "";
   if (m.signed_ok === 1) {
     if (m.key_state === "mine") return ` <span class="verified" title="Signed with your radio's key">🔏</span>`;
@@ -612,18 +653,19 @@ function msgHtml(m, reacts = null, fresh = new Set()) {
     : { sending: "sending…", delivered: "✓ delivered", failed: "✗ failed", sent: "sent" };
   const st = m.direction === "out"
     ? `<span class="st-${m.status}" title="${esc(dmStatusTip(m))}">${stWord[m.status] || ""}</span>` : "";
-  const sig = m.snr != null ? `<span class="chip ${qClass(m.snr)}">${m.snr} dB</span>` : "";
-  const warn = m.warn ? `<span class="chip q-bad" title="${esc(m.warn)}">⚠ unusual route</span>` : "";
+  const sig = m.snr != null ? `<span class="${snrT(m.snr)}" title="${esc(qWord(m.snr))}">SNR ${fmtDb(m.snr)}</span>` : "";
+  const rssi = m.rssi != null ? `<span>RSSI ${m.rssi}</span>` : "";
+  const warn = m.warn ? `<span class="q-bad-t" title="${esc(m.warn)}">⚠ unusual route</span>` : "";
   const hops = m.direction === "in"
-    ? (m.path_len != null ? `<span class="chip chip-hops">${hopsText(m.path_len)}</span>`
+    ? (m.path_len != null ? `<span${m.path_names ? ` title="${esc(m.path_names)}"` : ""}>${m.path_len === 0 ? "direct" : hopsText(m.path_len) + (m.path_names ? ` via ${esc(shortVia(m.path_names))}` : "")}</span>`
       : (m.kind === "dm" ? (() => { const lr = likelyRoute(m);
-          return `<span class="chip chip-hops" title="${lr ? `Likely via ${esc(lr.join(" → "))} (your saved route to them, reversed)` : "Arrived on an established direct route — no flood path to count"}">via saved route${lr ? ` · ${hopsText(lr.length)}` : ""}</span>`; })() : ""))
+          return `<span title="${lr ? `Likely via ${esc(lr.join(" → "))} (your saved route to them, reversed)` : "Arrived on an established direct route — no flood path to count"}">saved route${lr ? ` · likely ${esc(shortVia(lr.join(" → ")))}` : ""}</span>`; })() : ""))
     : "";
   const again = m.repeats > 1
-    ? `<span class="chip" title="${m.kind === "dm"
+    ? `<span title="${m.kind === "dm"
         ? `Their app sent this ${m.repeats} times because your delivery receipt didn't reach them`
         : `Posted ${m.repeats} times`}">received ${m.repeats} times</span>` : "";
-  const rtt = m.rtt_ms ? `<span>${(m.rtt_ms / 1000).toFixed(1)}s</span>` : "";
+  const rtt = m.rtt_ms ? `<span title="round trip">rtt ${(m.rtt_ms / 1000).toFixed(1)} s</span>` : "";
   const dmEcho = m.direction === "out" && m.kind === "dm" && m.status !== "delivered" && m.echoes != null
     ? `<span>${m.echoes ? `↺ repeated ×${m.echoes}` : "↺ not repeated yet"}</span>` : "";
   const chanStale = m.kind === "chan" && m.status === "sent" && !m.echoes && Date.now() - m.ts > 60000;
@@ -631,7 +673,7 @@ function msgHtml(m, reacts = null, fresh = new Set()) {
     ? (m.status === "failed"
         ? `<span class="st-failed" title="${esc(chanStatusTip(m))}">✗ not sent</span>`
         : m.echoes
-          ? `<span class="st-delivered" title="${esc(chanStatusTip(m))}">✓ on mesh · ↺×${m.echoes}</span>`
+          ? `<span class="st-delivered" title="${esc(chanStatusTip(m))}">✓ on mesh · ↺ ×${m.echoes}${m.echo_via ? ` via ${esc(m.echo_via)}` : ""}</span>`
           : chanStale
             ? `<span class="st-failed" title="${esc(chanStatusTip(m))}">✗ not picked up</span>`
             : `<span class="st-sending" title="${esc(chanStatusTip(m))}">sending…</span>`)
@@ -639,10 +681,12 @@ function msgHtml(m, reacts = null, fresh = new Set()) {
   const roomAuthor = m.direction === "in" && m.kind === "dm" && m.sender && m.sender !== contactName(m.peer);
   const badge = m.verified ? ` <span class="verified" title="Route matches the sender you confirmed">✓</span>` : "";
   const signedBadge = signedChip(m);
-  // In a 1:1 DM the sender is obvious — only channels and room posts get a name line.
-  const showWho = m.direction === "in" && (m.kind === "chan" || roomAuthor) && m.sender;
-  const who = showWho ? `<div class="who tint" data-mention="${esc(m.sender)}"${tint(m.sender)}>${esc(m.sender)}${badge}${signedBadge}</div>` : "";
-  const dmBadges = !showWho && m.direction === "in" ? badge + signedBadge : "";
+  // Every row names who it's from; channel and room authors can be tapped to mention them.
+  const author = m.direction === "out" ? "You" : m.sender || contactName(m.peer);
+  const canMention = m.direction === "in" && (m.kind === "chan" || roomAuthor) && m.sender;
+  const who = m.direction === "out" ? `<span class="who me">You</span>`
+    : `<span class="who tint"${canMention ? ` data-mention="${esc(m.sender)}"` : ""}${tint(author)}>${esc(author)}</span>`;
+  const head = `<div class="m-head"><span class="m-time">${hhmm(m.ts)}</span>${who}${m.direction === "in" ? badge + signedBadge : ""}</div>`;
   const canResend = m.direction === "out" && (m.status === "failed" ||
     (m.kind === "chan" && m.status === "sent" && !m.echoes && Date.now() - m.ts > 60000));
   const resendLabel = m.kind === "dm" && m.status === "failed" && m.echoes ? "↻ Send again anyway" : "↻ Resend";
@@ -654,8 +698,11 @@ function msgHtml(m, reacts = null, fresh = new Set()) {
   const chanHint = m.direction === "out" && (chanStale || (m.kind === "chan" && m.status === "failed"))
     ? `<p class="hint-line">No repeater was heard carrying this, so it didn't get out. Resend.</p>` : "";
   const arrive = fresh.has(m.id) ? " arrive" : "";
-  return `<div class="msg ${m.direction}${m.mention ? " mention" : ""}${m.hidden ? " is-hidden" : ""}${arrive}" data-id="${m.id}"><span class="swipe-ico" aria-hidden="true">↩</span>${who}<div class="text">${renderText(m.text)}</div>
-    ${reactsHtml(reacts, fresh, m.id)}<div class="foot">${dmBadges}${warn}${again}${sig}${hops}${rtt}<span>${hhmm(m.ts)}</span>${m.kind === "chan" && m.direction === "out" ? echo : dmEcho + st}</div>${failHint}${chanHint}${resend}</div>`;
+  const meta = m.direction === "in" ? hops + sig + rssi + again + warn + rtt
+    : (m.kind === "chan" ? echo : st + dmEcho) + rtt;
+  const usual = m.key_state === "unsigned_usual" ? " usual" : "";
+  return `<div class="msg ${m.direction}${m.mention ? " mention" : ""}${usual}${m.hidden ? " is-hidden" : ""}${arrive}" data-id="${m.id}"><span class="swipe-ico" aria-hidden="true">↩</span>${head}<div class="text">${renderText(m.text)}</div>
+    ${reactsHtml(reacts, fresh, m.id)}${meta ? `<div class="m-meta">${meta}</div>` : ""}${failHint}${chanHint}${resend}</div>`;
 }
 
 // The sheet slides away rather than vanishing. Every close goes through this,
@@ -776,7 +823,8 @@ function msgDetails(m) {
       : (m.kind === "dm" ? (likelyRoute(m) ? `via saved route · likely ${likelyRoute(m).join(" → ")} (your route to them, reversed; the packet itself carries no hop list)`
         : "via saved route (sent down an established path, so no hop list)") : null)) : null,
     "⚠ Warning": m.warn || null,
-    Signed: !m.signed ? null
+    Signed: m.key_state === "unsigned_usual" ? `⚠ no signature, though ${m.sender} usually signs and you pinned their key — it may be someone else using their name`
+      : !m.signed ? null
       : m.signed_ok === 0 ? `🔏✗ carries a signature that does not check out — ignore it`
       : m.key_state === "mine" ? `🔏 signed with your radio's key`
       : m.key_state === "match" ? `✓🔏 valid — key matches the one you pinned for ${m.sender}`
@@ -908,6 +956,15 @@ $("#msgs").addEventListener("click", async (e) => {
         public_key: card.dataset.cardKey, type: +card.dataset.cardType, name: card.dataset.cardName }) });
       S.contacts = await api("/contacts"); renderThread(); toast(`Added ${card.dataset.cardName}`);
     } catch (err) { fail(err, "Couldn't add"); btn.disabled = false; btn.textContent = "Add"; }
+    return;
+  }
+  const jc = e.target.closest("[data-join-chan]");
+  if (jc) {
+    e.stopPropagation();
+    const name = jc.dataset.joinChan;
+    if (!await confirmSheet(`Join ${name}?`, "A public hashtag channel: anyone who adds the same name can read and post.", "Join")) return;
+    try { const r = await api("/channels", { method: "POST", body: JSON.stringify({ name }) }); await refreshState(); toast(`Joined ${name}`); location.hash = `#/chan/${r.idx}`; }
+    catch (err) { fail(err, "Couldn't join"); }
     return;
   }
   const rs = e.target.closest("[data-resend]");
@@ -1208,8 +1265,8 @@ function connectStream() {
   });
   on("message", (e) => onMessage(JSON.parse(e.data)));
   on("message_update", (e) => onMessage(JSON.parse(e.data), true));
-  on("sample", (e) => { if (S.state) S.state.latest = JSON.parse(e.data); if (S.route[0] === "radio") renderRadio(); });
-  on("packet", (e) => onPacket(JSON.parse(e.data)));
+  on("sample", (e) => { if (S.state) S.state.latest = JSON.parse(e.data); renderStrip(); if (S.route[0] === "radio") renderRadio(); });
+  on("packet", (e) => { const p = JSON.parse(e.data); setTicker(p); onPacket(p); });
   on("contacts", () => { api("/contacts").then((c) => { S.contacts = c; }).catch(() => {}); loadContactsSoon(); });
   on("alert", (e) => { const d = JSON.parse(e.data); toast(`${d.title} — ${d.body}`); if (S.route[0] === "radio") renderBatteryList(); });
   on("channel_found", () => { if (S.route[0] === "chats") loadDiscovered(); });
@@ -1247,23 +1304,29 @@ function onPacket(p) {
   }
   if (S.route[0] === "map" && TR.on) trailPacket(p);
   if (PK.paused || (PK.type && (PK.type === "SIGNED" ? !p.signed : p.ptype !== PK.type))) return;
-  const tb = $("#live tbody");
+  const tb = $("#live");
   tb.querySelector(".empty-row")?.remove();
   tb.insertAdjacentHTML("afterbegin", pktRow(p));
-  while (tb.rows.length > 30) tb.deleteRow(-1);
+  while (tb.children.length > 30) tb.lastElementChild.remove();
 }
 
 // ---------- packet inspector ----------
 // Every received frame is stored raw for a week; tap one in the live log to see
 // its bytes, what each byte means, and (for channels we hold the key to) the text.
 const PK = { paused: false, type: "" };
-const pktRow = (p) => `<tr class="pkt" data-id="${p.id ?? ""}" tabindex="0"><td>${hhmm(p.ts)}</td><td>${esc(p.ptype)}${p.signed ? ` <span title="signed by ${esc(p.signed)}">✍️</span>` : ""}</td><td>${p.snr ?? ""}</td><td>${p.rssi ?? ""}</td><td>${esc(p.heard_from || "")}</td></tr>`;
+const pktRow = (p) => {
+  const hops = p.ptype === "TRACE" ? "trace" : p.path_len ? hopsText(p.path_len) : "direct";
+  const path = p.ptype !== "TRACE" ? shortPath(p.path, p.path_len) : "";
+  return `<button type="button" class="pkt" data-id="${p.id ?? ""}">
+    <span class="pk-top"><span class="m-time">${hhmmss(p.ts)}</span><b>${esc(p.ptype || "?")}</b>${p.signed ? `<span title="signed by ${esc(p.signed)}">✍️</span>` : ""}<span class="pk-what">${esc(p.summary || p.text || "")}</span></span>
+    <span class="m-meta">${p.route ? `<span>${esc(p.route)}</span>` : ""}<span>${hops}${path ? ` ${esc(path)}` : ""}</span>${p.snr != null ? `<span class="${snrT(p.snr)}">SNR ${fmtDb(p.snr)}</span>` : ""}${p.rssi != null ? `<span>RSSI ${p.rssi}</span>` : ""}${p.size ? `<span>${p.size} B</span>` : ""}<span>via ${esc(p.heard_from || "direct")}</span></span></button>`;
+};
 
 async function loadPackets() {
   let rows;
   try { rows = await api(`/packets?limit=30${PK.type ? "&type=" + PK.type : ""}`); } catch { return; }
-  $("#live tbody").innerHTML = rows.length ? rows.map(pktRow).join("")
-    : `<tr class="empty-row"><td colspan="5" class="empty">${PK.type === "SIGNED" ? "No signed messages heard in the last week." : PK.type ? "None of these heard yet." : "Waiting for packets…"}</td></tr>`;
+  $("#live").innerHTML = rows.length ? rows.map(pktRow).join("")
+    : `<p class="empty empty-row">${PK.type === "SIGNED" ? "No signed messages heard in the last week." : PK.type ? "None of these heard yet." : "Waiting for packets…"}</p>`;
 }
 
 $("#pkt-type").onclick = (e) => {
@@ -1277,8 +1340,7 @@ $("#pkt-pause").onclick = () => {
   $("#pkt-pause").setAttribute("aria-pressed", PK.paused);
   if (!PK.paused) loadPackets();   // catch up on what arrived while paused
 };
-$("#live tbody").onclick = (e) => { const id = e.target.closest("tr.pkt")?.dataset.id; if (id) openPacket(id); };
-$("#live tbody").onkeydown = (e) => { if (e.key === "Enter") $("#live tbody").onclick(e); };
+$("#live").onclick = (e) => { const id = e.target.closest(".pkt")?.dataset.id; if (id) openPacket(id); };
 
 function hexDump(hex, fields) {
   const owner = [];
@@ -1339,10 +1401,75 @@ function renderConn() {
   const ob = $("#offline");
   ob.hidden = !!up || !S.state;
   if (!up && S.state) ob.textContent = `Radio offline for ${ago(S.state.since)} — messages can't be sent.${S.state.last_error ? " " + S.state.last_error.replace(/\.?$/, ".") : ""}`;
-  $("#conn").textContent = up ? "Online" : "Offline";
+  $("#conn").textContent = up ? ({ usb: "USB", wifi: "WiFi" }[S.state.link] || "BLE") : "Offline";
   $("#conn").className = "pill " + (up ? "up" : "down");
   $("#conn").title = up ? `Radio connected for ${ago(S.state.since)}` : S.state?.last_error || "Radio disconnected";
+  renderStrip();
 }
+
+// The strip along the top: the radio's name, model and firmware, its LoRa preset and
+// TX power, battery, noise floor, airtime and the last packet's signal. Some parts only
+// fit on a desktop; on a phone the strip scrolls sideways.
+function renderStrip() {
+  const s = S.state; if (!s) return;
+  const L = s.latest || {}, r = s.radio || {}, d = s.device || {};
+  const v = L.battery?.level ? L.battery.level / 1000 : null, pct = v ? cellPct(v, battType(s.public_key)) : null;
+  const air = L.core?.uptime_secs ? ((L.radio?.tx_air_secs || 0) / L.core.uptime_secs * 100).toFixed(1) : null;
+  const err = L.packets?.recv ? Math.round(100 * (L.packets.recv_errors || 0) / L.packets.recv) : null;
+  const html = [
+    `<b>${esc(s.name || "radio")}</b>`,
+    d.model ? `<span class="wide-only">${esc(d.model)} · fw ${esc(String(d.ver || "").replace(/-.*/, ""))}</span>` : "",
+    r.radio_freq ? `<span>${r.radio_freq} SF${r.radio_sf} BW${r.radio_bw}</span>` : "",
+    s.tx_power != null ? `<span class="wide-only">TX ${s.tx_power} dBm</span>` : "",
+    v ? `<span title="${esc(BATT_TYPES[battType(s.public_key)])}">${v.toFixed(2)} V <span class="bat${pct < 20 ? " low" : ""}"><i style="width:${pct}%"></i></span> ${pct}%</span>` : "",
+    L.radio?.noise_floor != null ? `<span title="noise floor, dBm">noise ${L.radio.noise_floor}</span>` : "",
+    air != null ? `<span title="your transmit time since the radio started · duty-cycle limit 10%">air ${air}%</span>` : "",
+    err != null ? `<span class="wide-only ${err < 20 ? "q-good-t" : err < 40 ? "q-ok-t" : "q-bad-t"}" title="packets received with errors since the radio started">rx err ${err}%</span>` : "",
+    L.radio?.last_snr != null ? `<span class="wide-only">last rx <span class="${snrT(L.radio.last_snr)}">SNR ${fmtDb(L.radio.last_snr)}</span> RSSI ${L.radio.last_rssi}</span>` : "",
+  ].filter(Boolean).join("");
+  const body = $("#strip-body");
+  // The element keeps its animation; only what's inside it changes, so updates don't jump.
+  body.innerHTML = `<span class="grp">${html}</span>` + (body.classList.contains("marquee") ? `<span class="grp" aria-hidden="true">${html}</span>` : "");
+  fitStrip();
+}
+// On a screen too narrow for the whole strip it scrolls by on a loop (or, with reduced
+// motion, scrolls by hand behind a faded edge). Desktops have the room to show it all.
+function fitStrip() {
+  const body = $("#strip-body"), view = body.parentElement, grp = body.firstElementChild;
+  if (!grp) return;
+  const was = body.classList.contains("marquee");
+  body.classList.remove("marquee");
+  grp.querySelectorAll(".wide-only").forEach((e) => (e.style.display = wide ? "" : "inline"));   // measure with everything showing
+  const long = !wide && grp.scrollWidth > view.clientWidth;
+  grp.querySelectorAll(".wide-only").forEach((e) => (e.style.display = ""));
+  const roll = long && !calmMq.matches;
+  body.classList.toggle("marquee", roll);
+  view.classList.toggle("long", long && !roll);
+  if (roll) {
+    if (body.children.length < 2) body.insertAdjacentHTML("beforeend", `<span class="grp" aria-hidden="true">${grp.innerHTML}</span>`);
+    body.style.setProperty("--mq-dur", `${Math.round(grp.scrollWidth / 28)}s`);   // about 28 px a second
+  } else if (body.children.length > 1) body.lastElementChild.remove();
+  if (roll !== was && !roll) body.style.removeProperty("--mq-dur");
+}
+window.addEventListener("resize", debounce(fitStrip, 200));
+calmMq.addEventListener?.("change", fitStrip);
+
+// ---------- live ticker ----------
+// The last packet the radio heard: what and where from on one line, its first bytes on the
+// next. Under the header on the phone's Chats screen; along the bottom on a desktop.
+function setTicker(p) {
+  S.tick = p;
+  const via = p.heard_from && p.heard_from !== "direct" ? `via ${p.heard_from}` : p.path_len === 0 ? "direct" : "";
+  const where = [p.path_len ? hopsText(p.path_len) : "", via].filter(Boolean).join(" ");
+  $("#tk-line").innerHTML = `<span class="tk-t">${hhmm(p.ts)}</span><b>${esc(p.ptype || "?")}</b>${esc(p.text || "")}`
+    + (where ? `<span class="tk-t"> · ${esc(where)}</span>` : "")
+    + (p.snr != null ? ` · <span class="${snrT(p.snr)}">SNR ${fmtDb(p.snr)}</span>${p.rssi != null ? ` RSSI ${p.rssi}` : ""}` : "");
+  $("#tk-hex").textContent = p.raw ? p.raw.toUpperCase().match(/../g).join(" ") + (p.raw.length >= 96 ? " …" : "") : "";
+  showTicker();
+  const t = $("#ticker"); t.classList.remove("blip"); void t.offsetWidth; t.classList.add("blip");
+}
+function showTicker() { $("#ticker").hidden = !S.tick || !(wide || S.route[0] === "chats"); }
+$("#ticker").onclick = () => (location.hash = "#/signal/packets");
 
 function renderRadio() {
   const s = S.state; if (!s) return;
@@ -1358,23 +1485,24 @@ function renderRadio() {
   const v = L.battery?.level ? L.battery.level / 1000 : null, bt = battType(s.public_key);
   const air = L.core?.uptime_secs ? (((L.radio?.tx_air_secs || 0) / L.core.uptime_secs) * 100).toFixed(2) + "%" : "–";
   const g = L.radio ? snrGrade(L.radio.last_snr) : null;
+  const P = L.packets || {}, pct = v ? cellPct(v, bt) : null;
+  const errPct = P.recv ? Math.round(100 * (P.recv_errors || 0) / P.recv) : null;
   const tiles = [
-    ["Link", s.connected ? "Connected" : "Offline", s.connected ? `${{ usb: "USB", wifi: "WiFi" }[s.link] || "Bluetooth"} · ${ago(s.since)}` : (s.last_error || `for ${ago(s.since)}`), s.connected ? "ok" : "bad"],
-    ["Battery", v ? `${cellPct(v, bt)}%` : "–", v ? `${v.toFixed(2)} V · ${BATT_TYPES[bt]}` : "", v && cellPct(v, bt) < 20 ? "bad" : ""],
-    ["Last signal", L.radio ? `${L.radio.last_snr} dB` : "–", g ? `${g.word} · ${L.radio.last_rssi} dBm` : "", g ? (g.cls === "q-bad" ? "bad" : "") : ""],
-    ["Noise floor", L.radio ? `${L.radio.noise_floor} dBm` : "–", "lower is quieter", ""],
-    ["Uptime", L.core?.uptime_secs ? `${(L.core.uptime_secs / 3600).toFixed(1)} h` : "–", "", ""],
-    ["Airtime", air, "duty-cycle limit 10%", ""],
+    ["Link", s.connected ? ({ usb: "USB", wifi: "WiFi" }[s.link] || "Bluetooth") : "Offline", s.connected ? `up ${ago(s.since)} · ${s.reconnects ?? 0} reconnects` : (s.last_error || `for ${ago(s.since)}`), s.connected ? "ok" : "bad"],
+    ["Battery", pct != null ? `${pct}%` : "–", v ? `${v.toFixed(2)} V · ${BATT_TYPES[bt]}` : "", pct == null ? "" : pct < 20 ? "bad" : pct < 40 ? "warn" : "ok"],
+    ["Last signal", L.radio ? `SNR ${fmtDb(L.radio.last_snr)}` : "–", g ? `${g.word} · RSSI ${L.radio.last_rssi}` : "", toneOf(L.radio?.last_snr)],
+    ["Noise floor", L.radio ? `${L.radio.noise_floor}` : "–", "dBm · lower is quieter"],
+    ["Uptime", L.core?.uptime_secs ? durText(L.core.uptime_secs) : "–", `queue ${L.core?.queue_len ?? 0} · ${L.core?.errors ?? 0} errors`],
+    ["Airtime", air, "of uptime · limit 10%"],
+    ["Received", P.recv != null ? P.recv.toLocaleString() : "–", P.recv != null ? `flood ${P.flood_rx ?? "–"} · direct ${P.direct_rx ?? "–"}` : ""],
+    ["Sent", P.sent != null ? P.sent.toLocaleString() : "–", P.sent != null ? `flood ${P.flood_tx ?? "–"} · direct ${P.direct_tx ?? "–"}` : ""],
+    ["RX errors", errPct != null ? `${errPct}%` : "–", P.recv_errors != null ? `${P.recv_errors.toLocaleString()} packets` : "", errPct == null ? "" : errPct < 20 ? "ok" : errPct < 40 ? "warn" : "bad"],
+    ["TX power", s.tx_power != null ? `${s.tx_power} dBm` : "–", s.max_tx_power ? `max ${s.max_tx_power}` : ""],
+    ["Preset", r.radio_freq ? `${r.radio_freq}` : "–", r.radio_freq ? `SF${r.radio_sf} BW${r.radio_bw} CR${r.radio_cr}` : ""],
+    ["Contacts", `${S.contacts.length}`, s.device?.max_contacts ? `of ${s.device.max_contacts}` : ""],
   ];
-  $("#kv").innerHTML = tiles.map(([k, val, sub, tone]) =>
-    `<div class="stat ${tone}"><div class="k">${k}</div><div class="v">${esc(val)}</div><div class="s">${esc(sub)}</div></div>`).join("")
-    + `<dl class="kv span">${Object.entries({
-      Name: s.name,
-      Packets: L.packets ? `${L.packets.recv} received · ${L.packets.sent} sent · ${L.packets.recv_errors ?? 0} errors` : "–",
-      "TX power": s.tx_power != null ? `${s.tx_power} dBm` : "–",
-      Preset: r.radio_freq ? `${r.radio_freq} MHz · BW ${r.radio_bw} · SF${r.radio_sf} · CR${r.radio_cr}` : "–",
-      Reconnects: s.reconnects,
-    }).map(([k, x]) => `<dt>${k}</dt><dd>${esc(x)}</dd>`).join("")}</dl>`;
+  $("#kv").innerHTML = tiles.map(ovTile).join("");
+  menuValues();
   $("#notify-back").checked = s.notify_back !== false;
   $("#notify-offline").checked = s.notify_offline !== false;
   const on = new Set(s.notify_channels || []);
@@ -1503,12 +1631,23 @@ async function loadStats() {
       { side: 1, scale: "rssi", stroke: css("--muted"), grid: { show: false }, size: 44 }] });
     plot("#c-noise", [samples.map((s) => s.ts / 1000), samples.map((s) => s.radio?.noise_floor ?? null)],
       [{ label: "Noise dBm", stroke: acc, width: 1.5 }]);
-    $("#neigh tbody").innerHTML = neighbours.map((n) => `<tr><td>${esc(n.name)}</td><td>${n.count}</td>
-      <td>${n.snr_avg ?? ""}</td><td>${n.rssi_avg ?? ""}</td><td>${ago(n.last)}</td></tr>`).join("")
-      || `<tr><td colspan="5" class="empty">No packets in this range.</td></tr>`;
-    const max = Math.max(1, ...hops.map((h) => h.count));
-    $("#hops").innerHTML = hops.map((h) => `<div style="height:${(h.count / max) * 100}%" title="${h.count} packets"><span>${h.hops}</span></div>`).join("");
+    const total = neighbours.reduce((a, n) => a + n.count, 0) || 1, top = Math.max(1, ...neighbours.map((n) => n.count));
+    $("#neigh").innerHTML = neighbours.map((n) => `<div class="hr-row">
+      <div class="hr-top"><span class="nm">${esc(n.name)}</span><span class="n">${n.count.toLocaleString()} · ${Math.round(100 * n.count / total)}%</span></div>
+      <span class="tr"><i style="width:${Math.round(100 * n.count / top)}%"></i></span>
+      <div class="row-meta">${n.snr_avg != null ? `<span class="${snrT(n.snr_avg)}">SNR ${fmtDb(n.snr_avg)}</span> · ` : ""}RSSI ${n.rssi_avg ?? "–"} · last ${ago(n.last)}</div></div>`).join("")
+      || `<p class="empty">No packets in this range.</p>`;
+    renderOverview(S.stats);
+    $("#hops").innerHTML = ovHist(hops.map((h) => h.count), hops.map((h) => String(h.hops)));
+    const latest = (rows, f) => { for (let i = rows.length - 1; i >= 0; i--) if (f(rows[i]) != null) return f(rows[i]); return null; };
+    const trendNow = latest(health.trend, (t) => t.snr);
+    $("#now-trend").textContent = trendNow != null ? `now ${fmtDb(trendNow)} dB` : "";
+    $("#now-err").textContent = health.err_pct != null ? `now ${health.err_pct}%` : "";
+    $("#now-air").textContent = health.tx_pct_last_hour != null ? `now ${health.tx_pct_last_hour}%` : "";
+    $("#now-noise").textContent = health.noise_floor != null ? `now ${health.noise_floor} dBm` : "";
+    menuValues();
   } else if (S.route[0] === "radio") {
+    menuValues();
     plot("#c-bat", [samples.map((s) => s.ts / 1000), samples.map((s) => (s.battery?.level ? cellPct(s.battery.level / 1000, battType(S.state?.public_key)) : null))],
       [{ label: "Battery %", stroke: ok, width: 1.5 }], { scales: { x: { time: true }, y: { range: [0, 100] } } });
   }
@@ -1582,6 +1721,20 @@ $("#contact-search").addEventListener("input", debounce(() => {
   cquery = $("#contact-search").value.trim().toLowerCase(); renderContactList();
 }, 120));
 
+// The data line under a contact: when and how it was last heard, its signal and hops over
+// the last day (from /nearby), its route for messages, and what it advertises.
+function contactMeta(c) {
+  const n = S.nearBy?.get(c.public_key), p = presence(c), bits = [];
+  if (p) bits.push(esc(p.text) + (p.how ? ` · ${esc(p.how)}` : ""));
+  else if (c.last_advert) bits.push(`advert ${ago(c.last_advert * 1000)} ago`);
+  if (n?.snr != null) bits.push(`<span class="${snrT(n.snr)}">SNR ${fmtDb(n.snr)}</span>`);
+  if (c.type === 1 || c.type === 3) bits.push(routeText(c) + (c.route?.length ? ` via ${esc(shortVia(c.route.join(" → ")))}` : ""));
+  else if (n) bits.push(hopsText(n.path_len) + (n.last_hop && n.last_hop !== "direct" ? ` via ${esc(n.last_hop)}` : ""));
+  if (n?.count) bits.push(`×${n.count}`);
+  if (c.hash_size === 2) bits.push("2-byte");
+  if (c.lat || c.lon) bits.push("📍");
+  return bits.join(" · ");
+}
 // Filter (type / ★ favourites) + search by name or key, over the contacts we already have.
 function renderContactList() {
   const q = cquery;
@@ -1591,7 +1744,7 @@ function renderContactList() {
   $("#contact-list").innerHTML = list.map((c) => `<a href="#/contact/${c.public_key}"${S.route[0] === "contact" && S.route[1] === c.public_key ? ` aria-current="true"` : ""}>
     ${c.favourite ? `<span class="badge fav">★${presenceDot(c)}</span>` : `<span class="badge tint"${tint(c.name)}>${esc(initial(c.name))}${presenceDot(c)}</span>`}
     <span class="meta"><div class="name">${esc(c.name)} <span class="tag">${TYPES[c.type] || c.type}</span></div>
-    <div class="last">${routeText(c)}</div></span>
+    <div class="row-meta">${contactMeta(c)}</div></span>
     <span class="when">${presence(c) ? ago(c.heard[0] * 1000) : c.last_advert ? ago(c.last_advert * 1000) : ""}</span></a>`).join("")
     || `<p class="empty">${q ? `No contacts match "${esc(q)}".`
       : ctype === "fav" ? "No favourites yet. Open a contact and tap ☆ Favourite to keep it here (favourites are never auto-removed)."
@@ -1610,29 +1763,40 @@ async function loadContacts() {
   let contacts, pending, near, deliv, ver;
   try {
     [contacts, pending, near, deliv, ver] = await Promise.all([api("/contacts"), api("/pending"),
-      api(`/nearby?hours=${nearbyHours}`), api("/delivery"), api("/trust")]);
+      api("/nearby?hours=24"), api("/delivery"), api("/trust")]);
   } catch {
     if (!S.contacts.length) $("#contact-list").innerHTML = `<p class="empty">Can't reach the bridge right now.</p>`;
     return;
   }
   S.contacts = contacts;
+  S.nearBy = new Map(near.map((n) => [n.pubkey, n]));
   const max = S.state?.device?.max_contacts;
   $("#contact-count").textContent = `${contacts.length}${max ? " / " + max : ""}`;
+  const cnt = { "": contacts.length, fav: contacts.filter((c) => c.favourite).length };
+  for (const c of contacts) cnt[c.type] = (cnt[c.type] || 0) + 1;
+  document.querySelectorAll("#ctype button").forEach((b) => {
+    b.dataset.label ??= b.textContent;
+    b.innerHTML = `${esc(b.dataset.label)} <small>${cnt[b.dataset.t] || 0}</small>`;
+  });
   renderContactList();
 
-  $("#nearby").innerHTML = near.map((n) => `<label>
+  // Nodes you hear that aren't contacts (contacts carry the same data on their own rows),
+  // then adverts the radio holds for you to add, in one list.
+  const since = Date.now() - nearbyHours * 3600e3;
+  const heardNot = near.filter((n) => !n.is_contact && n.last_ts >= since);
+  const listed = new Set(heardNot.map((n) => n.pubkey));
+  const advertOnly = pending.filter((p) => !listed.has(p.public_key));
+  $("#nearby").innerHTML = [
+    ...heardNot.map((n) => `<label>
     <span class="badge tint"${tint(n.name || n.pubkey)}>${esc(initial(n.name || n.pubkey))}</span>
-    <span class="meta"><div class="name">${esc(n.name || n.pubkey.slice(0, 8))} <span class="tag">${TYPES[n.type] || ""}</span> ${hashBadge(n.hash_size)} ${callChip(n.name)}</div>
-    <div class="last"><span class="chip ${qClass(n.snr)}">${n.snr ?? "?"} dB</span> <span class="chip chip-hops">${hopsText(n.path_len)}</span>
-      ${n.last_hop && n.last_hop !== "direct" ? "via " + esc(n.last_hop) : ""} · heard ${n.count}×</div></span>
-    <span class="when">${ago(n.last_ts)}${n.is_contact ? "" : ` <button class="btn sm" data-addkey="${n.pubkey}">Add</button>`}</span></label>`).join("")
-    || `<p class="empty">Nothing heard in the last ${nearbyHours === 1 ? "hour" : nearbyHours + " hours"}. Nodes advertise every few hours.</p>`;
-  $("#nearby-note").textContent = near.length ? `${near.length}` : "";
-
-  $("#pending-wrap").hidden = !pending.length;
-  $("#pending").innerHTML = pending.map((p) => `<label><span class="badge tint"${tint(p.name)}>${esc(initial(p.name))}</span>
-    <span class="meta"><div class="name">${esc(p.name)}</div><div class="last">${TYPES[p.type] || ""}</div></span>
-    <button class="btn sm primary" data-add="${p.public_key}">Add</button></label>`).join("");
+    <span class="meta"><div class="name">${esc(n.name || n.pubkey.slice(0, 8))} <span class="tag">${TYPES[n.type] || ""}</span> ${callChip(n.name)}</div>
+    <div class="row-meta">${n.snr != null ? `<span class="${snrT(n.snr)}">SNR ${fmtDb(n.snr)}</span> · ` : ""}${hopsText(n.path_len)}${n.last_hop && n.last_hop !== "direct" ? " via " + esc(n.last_hop) : ""} · ×${n.count}${n.hash_size === 2 ? " · 2-byte" : ""}${n.lat ? " · 📍" : ""}</div></span>
+    <span class="when">${ago(n.last_ts)} <button class="btn sm" data-addkey="${n.pubkey}">Add</button></span></label>`),
+    ...advertOnly.map((p) => `<label><span class="badge tint"${tint(p.name)}>${esc(initial(p.name))}</span>
+    <span class="meta"><div class="name">${esc(p.name)} <span class="tag">${TYPES[p.type] || ""}</span></div><div class="row-meta">advert waiting to be added${p.lat ? " · 📍" : ""}</div></span>
+    <span class="when"><button class="btn sm primary" data-addkey="${p.public_key}">Add</button></span></label>`),
+  ].join("") || `<p class="empty">Nothing new heard in the last ${nearbyHours === 1 ? "hour" : nearbyHours + " hours"}. Nodes advertise every few hours.</p>`;
+  $("#nearby-note").textContent = heardNot.length + advertOnly.length ? `${heardNot.length + advertOnly.length}` : "";
 
   $("#verified-list").innerHTML = ver.map((v) => `<label><span class="badge ok">${v.pinned_key ? "🔏" : "✓"}</span>
     <span class="meta"><div class="name">${esc(v.sender)}</div><div class="last">${v.pinned_key
@@ -1658,15 +1822,8 @@ $("#verified-list").addEventListener("click", async (e) => {
 $("#nearby").addEventListener("click", async (e) => {
   const key = e.target.dataset.addkey; if (!key) return;
   e.preventDefault();
-  try { await api(`/pending/${key}`, { method: "POST" }); toast("Added to contacts"); loadContacts(); }
-  catch { toast("Can't add yet — wait for its next advert, or add it from a meshcore:// link.", "err"); }
-});
-
-$("#pending").addEventListener("click", async (e) => {
-  const key = e.target.dataset.add; if (!key) return;
-  e.preventDefault();
   try { await api(`/pending/${key}`, { method: "POST" }); toast("Added to contacts"); loadContacts(); refreshState().catch(() => {}); }
-  catch (err) { fail(err, "Couldn't add"); }
+  catch { toast("Can't add yet — wait for its next advert, or add it from a meshcore:// link.", "err"); }
 });
 
 $("#import").onsubmit = async (e) => {
@@ -1684,6 +1841,7 @@ async function shareUri(uri, title) {
     $("#sheet .sel-box").select();
   }
 }
+$("#my-uri-top").onclick = () => $("#my-uri").click();
 $("#my-uri").onclick = async () => {
   try { const r = await api("/self/uri"); shareUri(r.uri, "My MeshCore contact"); } catch (err) { fail(err, "Couldn't get your contact link"); }
 };
@@ -1862,6 +2020,10 @@ async function showCallsign(call) {
   else el.innerHTML = `<p class="hint">No QRZ profile for ${esc(call)}.</p>`;
 }
 document.addEventListener("click", (e) => {
+  const k = e.target.closest("[data-copy]"); if (!k) return;
+  navigator.clipboard?.writeText(k.dataset.copy).then(() => toast("Key copied"), () => toast(k.dataset.copy));
+});
+document.addEventListener("click", (e) => {
   const b = e.target.closest("[data-call]"); if (!b) return;
   e.preventDefault(); e.stopPropagation();
   showCallsign(b.dataset.call);
@@ -1873,7 +2035,7 @@ function logConsole(line) { const c = $("#console"); c.textContent += line + "\n
 function showOut(title, body, tone = "") {
   const o = $("#c-out"); o.hidden = false; o.className = "result " + tone;
   const rows = typeof body === "string" ? `<p>${esc(body)}</p>`
-    : `<dl class="kv">${Object.entries(body).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${typeof v === "object" ? esc(JSON.stringify(v)) : v}</dd>`).join("")}</dl>`;
+    : `<div class="ov-tiles">${Object.entries(body).map(([k, v]) => `<div class="ov-tile"><div class="k">${esc(k)}</div><div class="v">${typeof v === "object" ? esc(JSON.stringify(v)) : v}</div></div>`).join("")}</div>`;
   o.innerHTML = `<div class="result-title">${esc(title)}</div>${rows}`;
   o.scrollIntoView({ block: "nearest", behavior: "smooth" });
 }
@@ -1954,8 +2116,8 @@ function bwCard(w, withLink = false) {
   return `<div class="bw-card ${bwTone(r)}">
     <div class="bw-top"><span class="name">${withLink ? `<a href="#/contact/${esc(w.public_key)}">${esc(w.name)}</a>` : "Battery watch"}</span>
       <span class="bw-pct">${r?.pct != null ? `${r.pct}%` : "–"}</span></div>
-    <div class="bw-sub">${r?.v ? `${r.v.toFixed(2)} V · ` : ""}${BATT_TYPES[w.battery_type] || BATT_TYPES.liion} · alert below ${w.below}%${w.has_password ? "" : " · no login"}</div>
-    <div class="bw-sub">${esc(when)}</div>
+    <div class="row-meta">${r?.v ? `${r.v.toFixed(2)} V · ` : ""}${BATT_TYPES[w.battery_type] || BATT_TYPES.liion} · alert below ${w.below}%${w.has_password ? "" : " · no login"}</div>
+    <div class="row-meta">${esc(when)}</div>
   </div>`;
 }
 
@@ -1975,7 +2137,7 @@ async function renderBatteryWatch(c) {
   if (my !== nav) return;
   const w = list.find((x) => x.public_key === c.public_key);
   if (w) {
-    el.innerHTML = `${bwCard(w)}<div class="row-actions"><button class="btn sm" id="bw-check">Check now</button><button class="btn sm" id="bw-off">Stop watching</button></div>`;
+    el.innerHTML = `${bwCard(w)}<div class="row-actions btn-row"><button class="btn sm" id="bw-check">Check now</button><button class="btn sm" id="bw-off">Stop watching</button></div>`;
     picker();
     $("#bw-check").onclick = act($("#bw-check"), async () => {
       const r = await apiOTA(`/battery-watch/${c.prefix}/check`, { method: "POST" }, 1);
@@ -2013,6 +2175,9 @@ async function renderBatteryWatch(c) {
 async function renderBatteryList() {
   try {
     const list = await api("/battery-watch");
+    const low = list.map((w) => w.reading?.pct).filter((x) => x != null);
+    S.bwSummary = list.length ? `${list.length} watched${low.length ? ` · lowest ${Math.min(...low)}%` : ""}` : "none watched";
+    menuValues();
     $("#bw-list").innerHTML = list.length ? list.map((w) => bwCard(w, true)).join("")
       : `<p class="hint">None yet. Open a repeater in Contacts and turn on <b>Battery watch</b>.</p>`;
   } catch { $("#bw-list").innerHTML = `<p class="hint">Can't load — the bridge isn't reachable.</p>`; }
@@ -2032,6 +2197,7 @@ async function openContact(key) {
   const my = nav;
   $("#v-contact").hidden = false;
   if (!S.contacts.length) { try { S.contacts = await api("/contacts"); } catch { /* shown below */ } }
+  if (!S.nearBy) { try { S.nearBy = new Map((await api("/nearby?hours=24")).map((n) => [n.pubkey, n])); } catch { /* no signal tiles */ } }
   if (my !== nav) return;
   const c = S.contacts.find((x) => x.public_key === key || x.prefix === key);   // alerts link by prefix
   $("#c-out").hidden = true; $("#console").textContent = ""; $("#c-route").innerHTML = "";
@@ -2045,28 +2211,32 @@ async function openContact(key) {
   }
   $("#title").textContent = c.name;
   const isChat = c.type === 1, isNode = c.type === 2 || c.type === 3 || c.type === 4;
-  $("#c-hero").innerHTML = `${c.favourite ? `<span class="badge big fav">★</span>` : `<span class="badge big tint"${tint(c.name)}>${esc(initial(c.name))}</span>`}
-    <div><div class="hero-name">${esc(c.name)}</div>
-    <div class="hero-sub"><span class="tag">${TYPES[c.type] || c.type}</span> ${hashBadge(c.hash_size)} ${callChip(c.name)}
-      <span>${c.path_len < 0 ? "No fixed route — messages flood" : c.path_len === 0 ? "Direct — no repeaters" : `Route: ${c.path_len} hop${c.path_len === 1 ? "" : "s"}`}</span></div></div>`;
-  $("#c-kv").innerHTML = Object.entries({
-    "Last heard": c.last_advert ? new Date(c.last_advert * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "Not heard directly",
-    Location: c.lat ? `${c.lat.toFixed(4)}, ${c.lon.toFixed(4)}` : "Not shared",
-    Key: c.public_key.slice(0, 16) + "…",
-  }).map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join("");
+  const pr = presence(c), nb = S.nearBy?.get(c.public_key);
+  $("#c-hero").innerHTML = `${c.favourite ? `<span class="badge big fav">★${presenceDot(c)}</span>` : `<span class="badge big tint"${tint(c.name)}>${esc(initial(c.name))}${presenceDot(c)}</span>`}
+    <div class="c-headtxt"><div class="hero-name">${esc(c.name)} ${callChip(c.name)}</div>
+    <div class="row-meta">${esc(TYPES[c.type] || "node")} · ${c.hash_size === 2 ? "2-byte" : "1-byte"} hashes · key <button type="button" class="key-copy" data-copy="${c.public_key}" title="Copy the full key">${c.public_key.slice(0, 12)}…</button></div></div>`;
+  const heardTs = pr ? c.heard[0] * 1000 : c.last_advert ? c.last_advert * 1000 : 0;
+  $("#c-kv").innerHTML = [
+    ["Last heard", heardTs ? (ago(heardTs) === "now" ? "just now" : `${ago(heardTs)} ago`) : "never", pr?.how || (c.last_advert ? "advert" : "not heard directly")],
+    ["Route", c.path_len < 0 ? "flood" : c.path_len === 0 ? "direct" : hopsText(c.path_len), c.route?.length ? shortVia(c.route.join(" → ")) : c.path_len < 0 ? "no fixed route" : c.path_len === 0 ? "no repeaters" : "saved route"],
+    ["You hear it", nb?.snr != null ? `SNR ${fmtDb(nb.snr)}` : "–", nb ? `RSSI ${nb.rssi ?? "–"} · ${hopsText(nb.path_len)}${nb.last_hop && nb.last_hop !== "direct" ? " via " + nb.last_hop : ""}` : "not heard in 24 h", toneOf(nb?.snr)],
+    ["Heard", nb ? `×${nb.count}` : "–", nb?.first_ts ? `first ${ago(nb.first_ts)} ago` : ""],
+    ["Location", c.lat || c.lon ? `${c.lat.toFixed(3)}, ${c.lon.toFixed(3)}` : "not shared", (c.lat || c.lon) && S.state?.lat ? `${kmBetween([S.state.lat, S.state.lon], [c.lat, c.lon]).toFixed(1)} km from you` : ""],
+    ["Key", c.public_key.slice(0, 8), c.hash_size === 2 ? "2-byte path hashes" : "classic 1-byte hashes"],
+  ].map(ovTile).join("");
   $("#c-actions").innerHTML = [
-    isChat || c.type === 3 ? `<button class="btn primary" data-a="msg">Message</button>` : "",
-    `<button class="btn${c.favourite ? " on" : ""}" data-a="fav" aria-pressed="${!!c.favourite}">${c.favourite ? "★ Favourite" : "☆ Favourite"}</button>`,
-    c.lat ? `<button class="btn" data-a="map">Show on map</button>` : "",
-    `<button class="btn" data-a="share">Share</button>`,
-    `<button class="btn danger" data-a="remove">Remove</button>`,
+    isChat || c.type === 3 ? `<button class="btn sm primary" data-a="msg">Message</button>` : "",
+    `<button class="btn sm${c.favourite ? " on" : ""}" data-a="fav" aria-pressed="${!!c.favourite}">${c.favourite ? "★ Favourite" : "☆ Favourite"}</button>`,
+    c.lat ? `<button class="btn sm" data-a="map">Map</button>` : "",
+    `<button class="btn sm" data-a="share">Share</button>`,
+    `<button class="btn sm danger" data-a="remove">Remove</button>`,
   ].join("");
   $("#c-diag").innerHTML = [
-    `<button class="btn" data-a="discover">Find path</button>`,
-    c.type === 2 ? `<button class="btn" data-a="trace">Signal both ways</button>` : "",
-    isNode ? `<button class="btn" data-a="status">Status</button>` : "",
-    `<button class="btn" data-a="telemetry">Telemetry</button>`,
-    c.path_len >= 0 ? `<button class="btn" data-a="reset">Reset route</button>` : "",
+    `<button class="btn sm" data-a="discover">Find path</button>`,
+    c.type === 2 ? `<button class="btn sm" data-a="trace">Signal both ways</button>` : "",
+    isNode ? `<button class="btn sm" data-a="status">Status</button>` : "",
+    `<button class="btn sm" data-a="telemetry">Telemetry</button>`,
+    c.path_len >= 0 ? `<button class="btn sm" data-a="reset">Reset route</button>` : "",
   ].join("");
   $("#c-admin").hidden = !isNode;
   renderRoute(c);
@@ -2309,7 +2479,7 @@ async function showMap() {
     legend = L.control({ position: "bottomleft" });
     legend.onAdd = () => {
       const d = L.DomUtil.create("div", "map-legend");
-      d.innerHTML = `<span><i class="lg-you"></i>You</span><span><i class="lg-rep"></i>Repeater</span><span><i class="lg-person"></i>Person</span><span><i class="lg-room"></i>Room</span>`;
+      d.id = "map-legend";
       return d;
     };
     legend.addTo(map);
@@ -2334,21 +2504,28 @@ async function showMap() {
   layer.clearLayers();
   const colour = { 1: css("--link"), 2: css("--accent"), 3: css("--ok"), 4: css("--warn") };
   const nodes = new Map();
-  for (const n of heard) if (n.lat || n.lon) nodes.set(n.pubkey, { key: n.pubkey, name: n.name || n.pubkey.slice(0, 8), type: n.type, lat: n.lat, lon: n.lon, snr: n.snr, last: n.last_ts, contact: n.is_contact });
+  for (const n of heard) if (n.lat || n.lon) nodes.set(n.pubkey, { key: n.pubkey, name: n.name || n.pubkey.slice(0, 8), type: n.type, lat: n.lat, lon: n.lon, snr: n.snr, last: n.last_ts, contact: n.is_contact,
+    hops: n.path_len, via: n.last_hop, count: n.count, hash: n.hash_size });
   for (const c of S.contacts) if (c.lat || c.lon) nodes.set(c.public_key, { ...(nodes.get(c.public_key) || {}), key: c.public_key, name: c.name, type: c.type, lat: c.lat, lon: c.lon, contact: true });
   mapNodes = [...nodes.values()];
   const pts = [];
   for (const n of nodes.values()) {
     pts.push([n.lat, n.lon]);
     const link = n.contact ? `<br><a href="#/contact/${n.key}">Open contact</a>` : "";
+    const meta = [TYPES[n.type] || "node", n.snr != null && `<span class="${snrT(n.snr)}">SNR ${fmtDb(n.snr)}</span>`,
+      n.hops != null && hopsText(n.hops) + (n.via && n.via !== "direct" ? ` via ${esc(n.via)}` : ""), n.count && `×${n.count}`,
+      n.last && `heard ${ago(n.last)} ago`, n.hash === 2 && "2-byte", n.key.slice(0, 8)].filter(Boolean).join(" · ");
     L.circleMarker([n.lat, n.lon], { radius: n.type === 2 ? 8 : 6, color: colour[n.type] || css("--muted"), weight: 2, fillOpacity: n.contact ? .55 : .25 })
-      .bindPopup(`<b>${esc(n.name)}</b><br>${TYPES[n.type] || "node"}${n.snr != null ? ` · ${n.snr} dB` : ""}${n.last ? ` · heard ${ago(n.last)} ago` : ""}${link}`)
+      .bindPopup(`<b>${esc(n.name)}</b><div class="row-meta">${meta}</div>${link}`)
       .addTo(layer);
   }
   if (S.state?.lat) {
     pts.push([S.state.lat, S.state.lon]);
     L.circleMarker([S.state.lat, S.state.lon], { radius: 9, color: css("--fg"), weight: 3, fillOpacity: .9 }).bindPopup("You").addTo(layer);
   }
+  const byType = (t) => mapNodes.filter((n) => n.type === t).length;
+  $("#map-legend").innerHTML = `<span><i class="lg-you"></i>You</span><span><i class="lg-rep"></i>Repeaters <b>${byType(2)}</b></span>
+    <span><i class="lg-person"></i>People <b>${byType(1)}</b></span><span><i class="lg-room"></i>Rooms <b>${byType(3)}</b></span>`;
   if (S.focus) { map.setView([S.focus.lat, S.focus.lon], 13); S.focus = null; }
   else if (pts.length > 1) map.fitBounds(pts, { padding: [30, 30], maxZoom: 13 });
   else if (pts.length) map.setView(pts[0], 11);
@@ -2456,6 +2633,9 @@ async function fillFilters() {
   form.sender_regex.value = (f.sender_regex || []).join("\n");
   form.text_regex.value = (f.text_regex || []).join("\n");
   form.flood.checked = !!f.flood;
+  const rules = (f.sender_regex || []).length + (f.text_regex || []).length;
+  S.filterSummary = `${rules} rule${rules === 1 ? "" : "s"}${f.flood ? " · floods hidden" : ""}`;
+  menuValues();
 }
 $("#filters").onsubmit = async (e) => {
   e.preventDefault();
@@ -2497,6 +2677,20 @@ async function loadRadioSettings() {
   f.tz_offset.closest("label").hidden = r.tz_offset == null;   // firmware before v1.18 has no CLI
   $("#lora-unlock").checked = false; $("#lora").disabled = true;
   $("#lora-preset").value = [r.radio_freq, r.radio_bw, r.radio_sf, r.radio_cr].join(",");
+  const s = S.state || {}, who = ["nobody", "allowed", "everyone"];
+  const now = [
+    `${s.name || ""} · PIN ${s.device?.ble_pin ? "fixed" : "random"}`,
+    s.lat ? `${(+s.lat).toFixed(3)}, ${(+s.lon).toFixed(3)} · ${+r.adv_loc_policy ? "shared" : "private"}` : "not set",
+    (() => { const q = r.radio_freq != null ? r : s.radio || {};
+      return q.radio_freq != null ? `${q.radio_freq} SF${q.radio_sf} BW${q.radio_bw} CR${q.radio_cr} · ${s.tx_power ?? "–"} dBm` : ""; })(),
+    r.telemetry_mode_base != null ? `battery ${who[r.telemetry_mode_base]} · location ${who[r.telemetry_mode_loc]} · sensors ${who[r.telemetry_mode_env]}` : "",
+    `${s.manual_add_contacts ? "manual add" : "auto add"}${s.auto_manage !== false ? " · auto-manage" : ""}`,
+    r.path_hash_mode != null ? `${+r.path_hash_mode ? "2-byte" : "1-byte"} hashes${r.airtime_factor != null ? ` · airtime ×${r.airtime_factor}` : ""}` : "",
+  ];
+  f.querySelectorAll(":scope > h2.sub").forEach((h, i) => {
+    let el = h.querySelector("small.now"); if (!el) { el = document.createElement("small"); el.className = "now"; h.append(el); }
+    el.textContent = now[i] || "";
+  });
   const cv = r.custom || {};
   $("#gps-box").innerHTML = ("gps" in cv
     ? `<label class="check"><input id="cv-gps" type="checkbox" ${cv.gps === "1" ? "checked" : ""}> GPS on</label>
@@ -2602,6 +2796,7 @@ function applyTheme(t = themePref, pal = palettePref) {
   const bg = css("--bg");
   document.querySelectorAll('meta[name="theme-color"]').forEach((m) => m.setAttribute("content", bg));
   if (["signal", "radio"].includes(S.route[0])) loadStats();   // charts take their colours at draw time
+  if (typeof menuValues === "function") menuValues();
   if (S.route[0] === "map" && map) showMap();
 }
 $("#theme").onclick = (e) => { const t = e.target.dataset.theme; if (t) applyTheme(t); };
@@ -2614,6 +2809,247 @@ window.addEventListener("resize", debounce(() => {
   for (const [id, u] of Object.entries(charts)) { const el = $(id); if (el?.clientWidth) u.setSize({ width: el.clientWidth, height: 180 }); }
 }, 200));
 
+// ---------- data widgets: tiles, bars, small histograms ----------
+const ovTile = ([k, val, sub = "", tone = ""]) =>
+  `<div class="ov-tile ${tone}"><div class="k">${esc(k)}</div><div class="v">${esc(val)}</div><div class="s">${esc(sub)}</div></div>`;
+function ovBars(rows, cls = "") {
+  const max = Math.max(1, ...rows.map((r) => r.count));
+  return rows.map((r) => `<div class="ov-bar ${cls}"><span class="nm">${r.label}</span><span class="tr"><i style="width:${Math.round(100 * r.count / max)}%"></i></span><span class="n">${r.n}</span></div>`).join("");
+}
+function ovHist(vals, labels, cls = () => "") {
+  const max = Math.max(1, ...vals);
+  return `<div class="ov-hist">${vals.map((x, i) => `<i class="${cls(i)}" style="height:${Math.round(100 * x / max)}%" title="${esc(labels[i])}: ${x}"></i>`).join("")}</div>
+      <div class="ov-lbl">${labels.map((l) => `<span>${esc(l)}</span>`).join("")}</div>`;
+}
+function durText(x) { return x >= 86400 ? `${Math.floor(x / 86400)}d ${Math.floor(x % 86400 / 3600)}h` : `${Math.floor(x / 3600)}h ${Math.floor(x % 3600 / 60)}m`; }
+const toneOf = (snr) => snr == null ? "" : ({ "q-good": "ok", "q-ok": "warn", "q-bad": "bad" })[snrGrade(snr).cls] || "";
+const hhmmss = (ms) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+// A path's hops as hex, kept short: "43·56·40·…·DD".
+function shortPath(path, n) {
+  if (!path || !n) return "";
+  const w = Math.max(2, Math.round(path.length / n)), hops = path.toUpperCase().match(new RegExp(`.{1,${w}}`, "g")) || [];
+  return (hops.length > 4 ? [...hops.slice(0, 3), "…", hops.at(-1)] : hops).join("·");
+}
+
+// The live value at the right of each Signal and Radio menu row.
+function menuValues() {
+  const s = S.state || {}, L = s.latest || {}, r = s.radio || {}, st = S.stats, h = st?.health;
+  const v = L.battery?.level ? L.battery.level / 1000 : null;
+  const vals = {
+    battery: v ? `${cellPct(v, battType(s.public_key))}% · ${v.toFixed(2)} V` : "",
+    settings: [s.name, s.tx_power != null && `${s.tx_power} dBm`, r.radio_sf && `SF${r.radio_sf}`].filter(Boolean).join(" · "),
+    notify: S.state ? `${(s.notify_channels || []).length} channel${(s.notify_channels || []).length === 1 ? "" : "s"}${s.notify_offline !== false ? " · offline on" : ""}` : "",
+    batteries: S.bwSummary || "",
+    filters: S.filterSummary || "",
+    appearance: `${PALETTES.find((x) => x.id === palettePref)?.name || "Kanagawa"} · ${themePref}`,
+    maintenance: L.core?.uptime_secs ? `up ${durText(L.core.uptime_secs)}` : "",
+    placement: h?.best?.name ? `best ${h.best.name} ${fmtDb(h.best.snr_avg)}` : "",
+    charts: h ? [h.err_pct != null && `err ${h.err_pct}%`, h.tx_pct_last_hour != null && `air ${h.tx_pct_last_hour}%`].filter(Boolean).join(" · ") : "",
+    heard: st ? `${st.neighbours.filter((n) => !["direct", "?"].includes(n.name)).length} repeaters` : "",
+    packets: st?.hourly?.length && st.hourly.at(-1).pkts_per_min != null ? `${st.hourly.at(-1).pkts_per_min}/min` : "",
+  };
+  document.querySelectorAll("[data-mv]").forEach((el) => (el.textContent = vals[el.dataset.mv] || ""));
+}
+
+// ---------- Signal: overview ----------
+// This radio over the last hour, then the mesh as heard over the chosen range: who
+// carries the traffic, how far it travels, how well it arrives, where people talk.
+function renderOverview(st) {
+  const s = S.state || {}, L = s.latest || {}, o = st.overview, h = st.health;
+  if (!o) { $("#overview").innerHTML = ""; return; }
+  const v = L.battery?.level ? L.battery.level / 1000 : null, pct = v ? cellPct(v, battType(s.public_key)) : null;
+  const up = L.core?.uptime_secs, dur = durText;
+  const errTone = h.err_pct == null ? "" : h.err_pct < 20 ? "ok" : h.err_pct < 40 ? "warn" : "bad";
+  const tiles = [
+    ["Uptime", up ? dur(up) : "–", `queue ${L.core?.queue_len ?? "–"}`, ""],
+    ["Battery", v ? `${v.toFixed(2)} V` : "–", pct != null ? `${pct}%` : "", pct == null ? "" : pct < 20 ? "bad" : pct < 40 ? "warn" : "ok"],
+    ["Noise floor", h.noise_floor != null ? `${h.noise_floor}` : "–", "dBm", ""],
+    ["Airtime", h.tx_pct_last_hour != null ? `${h.tx_pct_last_hour}%` : "–", "last hour · limit 10%", (h.tx_pct_last_hour ?? 0) >= 10 ? "bad" : ""],
+    ["Received", L.packets?.recv != null ? L.packets.recv.toLocaleString() : "–", L.packets ? `flood ${L.packets.flood_rx ?? "–"} · direct ${L.packets.direct_rx ?? "–"}` : "", ""],
+    ["RX errors", h.err_pct != null ? `${h.err_pct}%` : "–", "last hour", errTone],
+  ];
+  const bars = ovBars, hist = ovHist;
+  const hopRows = st.hops.slice(0, 7);
+  const snrLbl = ["<−10", "−10", "−5", "0", "+5", "+10"], snrCls = (i) => i < 2 ? "q-bad" : i < 3 ? "q-ok" : "q-good";
+  const range = { "1h": "1 h", "6h": "6 h", "24h": "24 h", "7d": "7 days" }[S.range] || S.range;
+  $("#overview").innerHTML = `
+    <section class="ov-sec"><h3>This radio <small>last hour</small></h3><div class="ov-tiles">${tiles.map(ovTile).join("")}</div></section>
+    <section class="ov-sec"><h3>Busiest repeaters <small>share of paths · ${esc(range)}</small></h3>${bars(o.busiest.map((b) => ({
+      label: `<code>${esc(b.hop.toUpperCase())}</code>${b.name?.endsWith("?") ? `<span title="Several repeaters share this hop ID; this is a best guess">${esc(b.name.slice(0, -1))} <small class="muted">(guess)</small></span>` : esc(b.name || "unknown")}`, count: b.count, n: `${b.pct}%` })))
+      || `<p class="hint">No paths heard yet.</p>`}</section>
+    <section class="ov-sec ov-cols">
+      <div><h3>Hops travelled</h3>${hist(hopRows.map((x) => x.count), hopRows.map((x) => String(x.hops)))}</div>
+      <div><h3>SNR of every copy</h3>${hist(o.snr_buckets, snrLbl, snrCls)}</div>
+    </section>
+    <section class="ov-sec"><h3>Channel messages <small>${esc(range)}</small></h3>${bars(o.channels.map((c) => ({
+      label: esc(c.name || `Channel ${c.peer}`), count: c.count, n: c.count })), "chan") || `<p class="hint">No channel messages in this range.</p>`}</section>`;
+}
+
+// ---------- mute ----------
+// A muted chat still receives everything; it just sends no push (mentions included)
+// and stays out of the app badge. The bridge keeps the list, so it holds on every device.
+const convOf = (kind, peer) => S.convs.find((c) => c.kind === kind && c.peer === peer);
+const BELL = "M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a2 2 0 0 0 3.4 0";
+const BELL_OFF = "M6 8a6 6 0 0 1 9.3-5M18 8c0 7 3 9 3 9H9M13.7 21a2 2 0 0 1-3.4 0M3 3l18 18";
+function syncMuteBtn() {
+  const [kind, peer] = S.route, b = $("#mute-btn");
+  if (!["dm", "chan"].includes(kind)) return;
+  const until = convOf(kind, peer)?.muted_until, on = until != null;
+  b.classList.toggle("on", on);
+  b.querySelector("path").setAttribute("d", on ? BELL_OFF : BELL);
+  b.title = on ? (until === 0 ? "Muted" : `Muted until ${new Date(until).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" })}`) : "Mute this chat";
+  b.setAttribute("aria-label", b.title);
+}
+async function setMute(kind, peer, until) {
+  try {
+    const r = await api("/mute", { method: "POST", body: JSON.stringify({ kind, peer, until }) });
+    const c = convOf(kind, peer); if (c) c.muted_until = r.muted_until;
+    setBadge(r.badge); syncMuteBtn(); loadConvsSoon();
+    toast(until == null ? "Unmuted" : until === 0 ? "Muted until you unmute it" : `Muted until ${new Date(until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`);
+  } catch (err) { fail(err, "Couldn't change mute"); }
+}
+function muteSheet(kind = S.route[0], peer = S.route[1]) {
+  if (!["dm", "chan"].includes(kind)) return;
+  const until = convOf(kind, peer)?.muted_until, name = kind === "chan" ? chanName(peer) : contactName(peer);
+  showSheet(`<h3 id="sheet-title" tabindex="-1" autofocus>${until != null ? "Muted" : "Mute"} ${esc(name)}</h3>
+    <p class="hint">Messages still arrive and are kept. A muted chat sends no notifications, mentions of you included, and doesn't count towards the app badge.${until != null ? (until === 0 ? " Muted until you unmute it." : ` Muted until ${esc(new Date(until).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }))}.`) : ""}</p>
+    <div class="mute-opts">${[["1 h", 3600e3], ["8 h", 8 * 3600e3], ["1 week", 7 * 86400e3], ["Always", 0]].map(([l, ms]) =>
+      `<button type="button" class="btn" data-mute="${ms}">${l}</button>`).join("")}</div>
+    ${until != null ? `<div class="actions"><button type="button" class="btn primary" id="unmute">Unmute</button></div>` : ""}`);
+  $("#sheet-body").querySelectorAll("[data-mute]").forEach((b) => (b.onclick = () => {
+    $("#sheet").close(); setMute(kind, peer, +b.dataset.mute ? Date.now() + +b.dataset.mute : 0);
+  }));
+  $("#unmute")?.addEventListener("click", () => { $("#sheet").close(); setMute(kind, peer, null); });
+}
+$("#mute-btn").onclick = () => muteSheet();
+
+// ---------- go anywhere (Ctrl/⌘+K) ----------
+// Type part of any chat, person, repeater, page, action or theme and press enter.
+// Scoring follows meshcore-tui's finder (MIT): each letter in order scores, more where a
+// word starts and more again in a run, less for every letter skipped; the best placing wins.
+const FZ = { letter: 2, word: 8, first: 4, run: 6, gap: 1, whole: 20 };
+function fuzzy(q, t) {
+  q = [...q.toLowerCase()]; t = [...t.toLowerCase()];
+  const n = q.length, l = t.length, none = -1e9;
+  if (!n || n > l) return null;
+  const isWord = (c) => /[\p{L}\p{N}]/u.test(c);
+  const bonus = (j) => FZ.letter + (j === 0 || !isWord(t[j - 1]) ? FZ.word : 0) + (j === 0 ? FZ.first : 0);
+  const best = Array.from({ length: n }, () => new Array(l).fill(none)), from = Array.from({ length: n }, () => new Array(l).fill(-1));
+  for (let j = 0; j < l; j++) if (t[j] === q[0]) best[0][j] = bonus(j) - Math.floor(j * FZ.gap / 2);
+  for (let i = 1; i < n; i++) {
+    let run = none, runAt = -1;
+    for (let j = 0; j < l; j++) {
+      if (j >= 2) {
+        run -= FZ.gap;
+        const p = best[i - 1][j - 2];
+        if (p > none && p - FZ.gap > run) { run = p - FZ.gap; runAt = j - 2; }
+      }
+      if (j === 0 || t[j] !== q[i]) continue;
+      let sc = run, k = runAt;
+      const p = best[i - 1][j - 1];
+      if (p > none && p + FZ.run >= sc) { sc = p + FZ.run; k = j - 1; }
+      if (k >= 0) { best[i][j] = sc + bonus(j); from[i][j] = k; }
+    }
+  }
+  let top = none, end = -1;
+  best[n - 1].forEach((b, j) => { if (b > top) { top = b; end = j; } });
+  if (end < 0) return null;
+  if (n === l) top += FZ.whole;
+  const at = new Array(n);
+  for (let i = n - 1; i >= 0; i--) { at[i] = end; end = from[i][end]; }
+  return { score: top, at };
+}
+const markHits = (label, at) => { const set = new Set(at); return [...label].map((c, i) => set.has(i) ? `<mark>${esc(c)}</mark>` : esc(c)).join(""); };
+
+const RECENT_KEY = "finder-recent";
+const recentIds = () => { try { return JSON.parse(localStorage.getItem(RECENT_KEY) || "[]"); } catch { return []; } };
+function finderTargets() {
+  const t = [];
+  const add = (group, label, sub, kind, go, id = `${group}:${label}`) => t.push({ group, label, sub, kind, go, id });
+  for (const c of S.convs) {
+    const name = c.kind === "chan" ? chanName(c.peer) : c.name || contactName(c.peer);
+    add("Chats", name, c.last_text ? `${c.last_sender && c.kind === "chan" ? c.last_sender + ": " : ""}${c.last_text}` : "", c.kind === "chan" ? "channel" : "chat", () => (location.hash = `#/${c.kind}/${c.peer}`), `${c.kind}:${c.peer}`);
+  }
+  for (const [i, n] of Object.entries(S.state?.channels || {}))
+    if (!convOf("chan", i)) add("Chats", n, "no messages yet", "channel", () => (location.hash = `#/chan/${i}`), `chan:${i}`);
+  for (const c of S.contacts) {
+    const kind = TYPES[c.type] || "contact";
+    add(c.type === 2 || c.type === 3 ? "Repeaters and rooms" : "People", c.name, `${routeText(c)}${c.last_advert ? ` · advert ${ago(c.last_advert * 1000)} ago` : ""}`, kind, () => (location.hash = `#/contact/${c.public_key}`), `contact:${c.public_key}`);
+  }
+  const pages = [["Chats", "#/chats"], ["Contacts", "#/contacts"], ["Map", "#/map"], ["Signal · overview", "#/signal"], ["Placement mode", "#/placement"],
+    ["Signal · charts", "#/signal/charts"], ["Signal · who you hear", "#/signal/heard"], ["Signal · live packets", "#/signal/packets"],
+    ["Radio", "#/radio"], ["Radio · settings", "#/radio/settings"], ["Radio · battery", "#/radio/battery"], ["Radio · notifications", "#/radio/notify"],
+    ["Radio · repeater batteries", "#/radio/batteries"], ["Radio · spam filters", "#/radio/filters"], ["Radio · appearance", "#/radio/appearance"], ["Radio · maintenance", "#/radio/maintenance"]];
+  for (const [label, hash] of pages) add("Pages", label, "", "page", () => (location.hash = hash));
+  if (["dm", "chan"].includes(S.route[0])) {
+    const [k, p] = S.route, muted = convOf(k, p)?.muted_until != null;
+    add("Actions", muted ? "Unmute this chat" : "Mute this chat", k === "chan" ? chanName(p) : contactName(p), "action", () => (muted ? setMute(k, p, null) : muteSheet(k, p)), "act:mute");
+  }
+  add("Actions", "Send an advert", "zero-hop, to nodes that hear you directly", "action", () => api("/advert", { method: "POST" }).then(() => toast("Advert sent"), fail), "act:advert");
+  add("Actions", "Scan a QR code", "add a contact or a channel", "action", () => scanQr(), "act:scan");
+  add("Actions", "My QR code", "let someone add you", "action", () => $("#my-qr").click(), "act:myqr");
+  for (const p of PALETTES) add("Themes", `${p.name} theme`, "colours", "theme", () => applyTheme(themePref, p.id), `theme:${p.id}`);
+  for (const m of ["system", "light", "dark"]) add("Themes", `${m[0].toUpperCase() + m.slice(1)} mode`, "", "theme", () => applyTheme(m, palettePref), `mode:${m}`);
+  return t;
+}
+const FD = { all: [], shown: [], sel: 0 };
+function finderRender() {
+  const q = $("#fd-q").value.trim();
+  let rows;
+  if (!q) {
+    const rec = recentIds(), byId = new Map(FD.all.map((x) => [x.id, x]));
+    rows = rec.map((id) => byId.get(id)).filter(Boolean).map((x) => ({ ...x, group: "Recent", at: [] }));
+    if (!rows.length) rows = FD.all.filter((x) => x.group === "Chats").slice(0, 8).map((x) => ({ ...x, at: [] }));
+  } else {
+    const seen = new Set();
+    rows = FD.all.map((x) => { const f = fuzzy(q, x.label); return f && { ...x, score: f.score, at: f.at }; }).filter(Boolean)
+      .sort((a, b) => b.score - a.score || a.label.length - b.label.length)
+      .filter((x) => !seen.has(x.id) && seen.add(x.id)).slice(0, 40);
+    const tag = q.match(/^#[\p{L}\p{N}_-]{2,30}$/u);
+    if (tag && !Object.values(S.state?.channels || {}).some((n) => n.toLowerCase() === q.toLowerCase()))
+      rows.unshift({ group: "Actions", label: `Join ${q}`, sub: "public hashtag channel", kind: "join", at: [], id: `join:${q}`,
+        go: () => api("/channels", { method: "POST", body: JSON.stringify({ name: q }) }).then(async (r) => { await refreshState(); toast(`Joined ${q}`); location.hash = `#/chan/${r.idx}`; }, (e) => fail(e, "Couldn't join")) });
+  }
+  FD.shown = rows; FD.sel = Math.min(FD.sel, Math.max(0, rows.length - 1));
+  let last = "";
+  $("#fd-list").innerHTML = rows.map((x, i) => {
+    const g = !q && x.group !== last ? `<div class="fd-group">${esc(x.group)}</div>` : "";   // search results are ranked, not grouped
+    last = x.group;
+    return `${g}<button type="button" class="fd-item" role="option" id="fd-${i}" data-i="${i}" aria-selected="${i === FD.sel}">
+      <span class="t"><span>${markHits(x.label, x.at)}</span>${x.sub ? `<small>${esc(x.sub)}</small>` : ""}</span><span class="k">${esc(x.kind)}</span></button>`;
+  }).join("") || `<p class="fd-empty">Nothing matches "${esc(q)}".</p>`;
+  $("#fd-q").setAttribute("aria-activedescendant", rows.length ? `fd-${FD.sel}` : "");
+}
+function finderGo(i) {
+  const x = FD.shown[i]; if (!x) return;
+  try { localStorage.setItem(RECENT_KEY, JSON.stringify([x.id, ...recentIds().filter((id) => id !== x.id)].slice(0, 12))); } catch { /* private mode */ }
+  $("#finder").close();
+  x.go();
+}
+function openFinder() {
+  if ($("#sheet").open) $("#sheet").close();
+  FD.all = finderTargets(); FD.sel = 0;
+  $("#fd-q").value = "";
+  if (!$("#finder").open) $("#finder").showModal();
+  finderRender(); $("#fd-q").focus();
+}
+$("#find-btn").onclick = openFinder;
+$("#fd-q").addEventListener("input", () => { FD.sel = 0; finderRender(); });
+$("#fd-q").addEventListener("keydown", (e) => {
+  const move = { ArrowDown: 1, ArrowUp: -1 }[e.key];
+  if (move) {
+    e.preventDefault();
+    FD.sel = Math.min(Math.max(FD.sel + move, 0), FD.shown.length - 1); finderRender();
+    $(`#fd-${FD.sel}`)?.scrollIntoView({ block: "nearest" });
+  } else if (e.key === "Enter") { e.preventDefault(); finderGo(FD.sel); }
+  else if (e.key === "Escape") { e.preventDefault(); $("#finder").close(); }   // a search box would only clear itself
+});
+$("#fd-list").addEventListener("click", (e) => { const b = e.target.closest("[data-i]"); if (b) finderGo(+b.dataset.i); });
+$("#finder").addEventListener("click", (e) => { if (e.target === $("#finder")) $("#finder").close(); });   // the backdrop
+document.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); $("#finder").open ? $("#finder").close() : openFinder(); }
+});
+
 // ---------- boot ----------
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => { /* offline cache is optional */ });
 (async () => {
@@ -2621,4 +3057,5 @@ if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catc
   connectStream();
   go();
   syncPush();
+  api("/packets?limit=1").then((r) => { if (r[0] && !S.tick) setTicker(r[0]); }, () => {});
 })();

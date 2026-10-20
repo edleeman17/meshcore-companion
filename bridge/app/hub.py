@@ -35,7 +35,7 @@ class Hub:
             asyncio.create_task(self._push_all(data))
 
     def _wants(self, m: dict) -> bool:
-        if m.get("direction") != "in":
+        if m.get("direction") != "in" or f"{m['kind']}:{m['peer']}" in self.db.muted():
             return False
         if m["kind"] == "dm" or m.get("mention"):
             return True

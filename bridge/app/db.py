@@ -227,12 +227,15 @@ class DB:
                     AND COALESCE(m2.hidden,0)=0 ORDER BY ts DESC LIMIT 1) AS last_id
             FROM messages m WHERE COALESCE(hidden,0)=0 GROUP BY kind, peer ORDER BY last_ts DESC""")
         last = {r["id"]: r for r in self._rows(
-            f"SELECT id, text, direction, sender FROM messages WHERE id IN ({','.join('?' * len(rows))})",
+            f"SELECT id, text, direction, sender, snr, path_len, path_names, status, echoes FROM messages "
+            f"WHERE id IN ({','.join('?' * len(rows))})",
             [r["last_id"] for r in rows])} if rows else {}
-        read = self.get_setting("read", {})
+        read, muted = self.get_setting("read", {}), self.muted()
         for r in rows:
             m = last.get(r.pop("last_id"), {})
             r["last_text"], r["last_dir"], r["last_sender"] = m.get("text"), m.get("direction"), m.get("sender")
+            r["last_meta"] = {k: m.get(k) for k in ("snr", "path_len", "path_names", "status", "echoes")}
+            r["muted_until"] = muted.get(f"{r['kind']}:{r['peer']}")
             since = read.get(f"{r['kind']}:{r['peer']}", 0)
             r["unread"], r["mentions"] = self._rows(
                 "SELECT COUNT(*) AS n, COALESCE(SUM(mention),0) AS m FROM messages "
@@ -245,11 +248,30 @@ class DB:
         read[f"{kind}:{peer}"] = now_ms()
         self.set_setting("read", read)
 
+    def muted(self) -> dict:
+        """Muted conversations, "kind:peer" -> until (epoch ms; 0 = until unmuted). Expired ones are dropped."""
+        m = self.get_setting("muted", {})
+        live = {k: v for k, v in m.items() if v == 0 or v > now_ms()}
+        if len(live) != len(m):
+            self.set_setting("muted", live)
+        return live
+
+    def set_muted(self, kind: str, peer: str, until: int | None):
+        m = self.muted()
+        if until is None:
+            m.pop(f"{kind}:{peer}", None)
+        else:
+            m[f"{kind}:{peer}"] = until
+        self.set_setting("muted", m)
+
     def unread_total(self) -> int:
-        """Unread DMs + unread mentions + unread in channels with notifications on (the badge number)."""
+        """Unread DMs + unread mentions + unread in channels with notifications on (the badge number).
+        Muted conversations don't count."""
         notify = set(self.get_setting("notify_channels", []))
         total = 0
         for r in self.conversations():
+            if r["muted_until"] is not None:
+                continue
             if r["kind"] == "dm" or r["peer"] in notify:
                 total += r["unread"]
             else:
