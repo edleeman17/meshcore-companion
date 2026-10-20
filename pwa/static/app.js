@@ -1,5 +1,7 @@
 // MeshCore Companion PWA: chats, contacts, map, signal stats and radio panel over the bridge API (/api/*).
 const $ = (s) => document.querySelector(s);
+// Safari ignores user-scalable=no, so stop pinch-zoom here (maps handle their own gestures)
+for (const ev of ["gesturestart", "gesturechange"]) document.addEventListener(ev, (e) => { if (!e.target.closest?.(".leaflet-container")) e.preventDefault(); }, { passive: false });
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const api = async (path, opts = {}) => {
   const r = await fetch("/api" + path, { headers: { "Content-Type": "application/json" }, ...opts });
