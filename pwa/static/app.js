@@ -106,8 +106,8 @@ const isSplit = () => document.body.classList.contains("split");
 // screen moves, so it never waits on the outgoing one. Off for reduced motion.
 const calmMq = matchMedia("(prefers-reduced-motion: reduce)");
 const TAB_ORDER = ["chats", "contacts", "map", "signal", "radio"];
-const tabOf = (p) => ["dm", "chan"].includes(p[0]) ? "chats" : p[0] === "contact" ? "contacts" : p[0] === "placement" ? "signal" : p[0];
-const depthOf = (p) => ["dm", "chan", "contact", "placement"].includes(p[0]) || (["signal", "radio"].includes(p[0]) && p[1]) ? 1 : 0;
+const tabOf = (p) => ["dm", "chan", "chess"].includes(p[0]) ? "chats" : p[0] === "contact" ? "contacts" : p[0] === "placement" ? "signal" : p[0];
+const depthOf = (p) => ["dm", "chan", "contact", "placement", "chess"].includes(p[0]) || (["signal", "radio"].includes(p[0]) && p[1]) ? 1 : 0;
 const MOVES = {
   push: { x: 32, ms: 240 }, pop: { x: -32, ms: 240 },
   next: { x: 16, ms: 200 }, prev: { x: -16, ms: 200 }, swap: { x: 0, ms: 160 },
@@ -224,14 +224,15 @@ function go(still = false) {
   closeMsgMenu();
   const parts = routeParts();
   S.route = parts;
-  const tab = ["dm", "chan"].includes(parts[0]) ? "chats" : parts[0] === "contact" ? "contacts"
+  const tab = ["dm", "chan", "chess"].includes(parts[0]) ? "chats" : parts[0] === "contact" ? "contacts"
     : parts[0] === "placement" ? "signal" : parts[0];
-  const split = wide && (tab === "chats" || tab === "contacts");
+  const split = wide && (tab === "chats" || tab === "contacts") && parts[0] !== "chess";
   document.querySelectorAll(".view").forEach((v) => (v.hidden = true));
   document.querySelectorAll(".tabs a").forEach((a) => a.classList.toggle("on", a.dataset.tab === tab));
-  $("#back").hidden = !(["dm", "chan", "contact", "placement"].includes(parts[0]) || (["signal", "radio"].includes(parts[0]) && parts[1])) || split;
+  $("#back").hidden = !(["dm", "chan", "contact", "placement", "chess"].includes(parts[0]) || (["signal", "radio"].includes(parts[0]) && parts[1])) || split;
   $("#info").hidden = !["dm", "chan"].includes(parts[0]);
   $("#mute-btn").hidden = !["dm", "chan"].includes(parts[0]);
+  $("#chess-btn").hidden = parts[0] !== "dm" || S.contacts.find((c) => c.prefix === parts[1])?.type !== 1;
   $("#finder").open && $("#finder").close();
   $("#thread-info").hidden = true;
   document.body.classList.toggle("in-thread", ["dm", "chan"].includes(parts[0]));
@@ -254,6 +255,7 @@ function go(still = false) {
   if (parts[0] === "dm" || parts[0] === "chan") openThread(parts[0], parts[1]);
   else if (parts[0] === "contact") openContact(parts[1]);
   else if (parts[0] === "placement") { $("#v-placement").hidden = false; $("#title").textContent = "Placement"; openPlacement(); }
+  else if (parts[0] === "chess") { $("#v-chess").hidden = false; $("#title").textContent = `Chess · ${contactName(parts[1])}`; CH.sel = null; loadChess(); }
   else if (tab === "contacts") { if (!split) { $("#v-contacts").hidden = false; $("#title").textContent = "Contacts"; loadContacts(); } }
   else if (tab === "map") { $("#v-map").hidden = false; $("#title").textContent = "Map"; showMap(); }
   else if (tab === "signal") { showSub("signal", parts[1]); loadStats(); if (parts[1] === "packets") loadPackets(); }
@@ -294,17 +296,19 @@ async function refreshView() {
     else if (view === "signal" || view === "radio") { if (view === "radio") renderRadio(); loadStats(); }
     else if (view === "map") showMap();
     else if (view === "placement") openPlacement();
+    else if (view === "chess") loadChess();
     else if (view !== "contact") loadConvs();
   } catch { /* offline: the banner says so */ }
 }
 window.addEventListener("hashchange", navigate);
 $("#back").onclick = () => (location.hash = ["signal", "radio"].includes(S.route[0]) ? `#/${S.route[0]}`
+  : S.route[0] === "chess" ? `#/dm/${S.route[1]}`
   : { contact: "#/contacts", placement: "#/signal" }[S.route[0]] || "#/chats");
 // Keyboard (desktop): Esc closes the open conversation/contact, "/" jumps to search.
 document.addEventListener("keydown", (e) => {
   if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || $("#sheet").open) return;
   if (e.target.closest?.("input, textarea, select, [contenteditable]")) return;
-  if (e.key === "Escape" && ["dm", "chan", "contact", "placement"].includes(S.route[0])) { e.preventDefault(); $("#back").click(); }
+  if (e.key === "Escape" && ["dm", "chan", "contact", "placement", "chess"].includes(S.route[0])) { e.preventDefault(); $("#back").click(); }
   else if (e.key === "/" && ["chats", "dm", "chan"].includes(S.route[0]) && !$("#v-chats").hidden) { e.preventDefault(); $("#search").focus(); }
 });
 
@@ -703,7 +707,7 @@ function msgHtml(m, reacts = null, fresh = new Set()) {
   const meta = m.direction === "in" ? hops + sig + rssi + again + warn + rtt
     : (m.kind === "chan" ? echo : st + dmEcho) + rtt;
   const usual = m.key_state === "unsigned_usual" ? " usual" : "";
-  return `<div class="msg ${m.direction}${m.mention ? " mention" : ""}${usual}${m.hidden ? " is-hidden" : ""}${arrive}" data-id="${m.id}"><span class="swipe-ico" aria-hidden="true">↩</span>${head}<div class="text">${renderText(m.text)}</div>
+  return `<div class="msg ${m.direction}${m.mention ? " mention" : ""}${usual}${m.hidden ? " is-hidden" : ""}${arrive}" data-id="${m.id}"><span class="swipe-ico" aria-hidden="true">↩</span>${head}<div class="text">${chessChip(m) || renderText(m.text)}</div>
     ${reactsHtml(reacts, fresh, m.id)}${meta ? `<div class="m-meta">${meta}</div>` : ""}${failHint}${chanHint}${resend}</div>`;
 }
 
@@ -978,6 +982,7 @@ $("#msgs").addEventListener("click", async (e) => {
     catch (err) { fail(err, "Couldn't resend"); rs.disabled = false; rs.textContent = "↻ Resend"; }
     return;
   }
+  if (e.target.closest(".chess-chip")) return;   // a link to the board
   const rc = e.target.closest("[data-reacts]");
   if (rc) { e.stopPropagation(); reactionDetails(+rc.dataset.reacts, rc.dataset.emoji); return; }
   const at = e.target.closest("[data-mention]");
@@ -1291,6 +1296,7 @@ setInterval(() => { if (document.visibilityState === "visible" && Date.now() - l
 
 function onMessage(m, update = false) {
   const [kind, peer] = S.route;
+  if (kind === "chess" && m.kind === "dm" && m.peer === peer && parseChess(m.text)) { loadChess(); return; }
   if (m.kind === kind && m.peer === peer) {
     const i = S.thread.findIndex((x) => x.id === m.id);
     if (i >= 0) S.thread[i] = m; else if (!update) S.thread.push(m);
@@ -2304,6 +2310,226 @@ async function openContact(key) {
     catch (err) { logConsole(`✗ ${err.message}`); }
   };
 }
+
+// ---------- chess ----------
+// A game is ordinary short DMs any client can read (see bridge/app/chess.py), so
+// every move gets the normal delivery receipt. chess.js plays the rules; the
+// "#a41c" on each move is a checksum of the position after it, so two boards
+// that drift apart (a lost or doubled move) notice and can be put back in step.
+const CHESS_RE = /^♟[\uFE0E\uFE0F]?([0-9a-z]{3}) (?:new (white|black)|(\d{1,3})(\.\.\.|\.) (\S{2,8}) #([0-9a-f]{4})|(resign|draw\?|draw ok)|sync (\S+ [wb] \S+ \S+ \d+ \d+))$/;
+const PAWN = "♟\uFE0E";   // text style: iOS otherwise draws ♟ as an emoji
+function parseChess(t) {
+  const m = CHESS_RE.exec(String(t || "").trim()); if (!m) return null;
+  const [, game, colour, num, dots, san, check, act, fen] = m;
+  if (colour) return { game, kind: "new", colour };
+  if (san) return { game, kind: "move", ply: (num - 1) * 2 + (dots === "..." ? 1 : 0), san, check, label: `${num}${dots} ${san}` };
+  if (act) return { game, kind: { resign: "resign", "draw?": "draw_offer", "draw ok": "draw_accept" }[act] };
+  return { game, kind: "sync", fen };
+}
+// Position checksum: FNV-1a of board, side to move and castling (en passant is
+// left out; chess.js versions disagree on when to write it).
+function fenCheck(fen) {
+  let h = 2166136261;
+  for (const ch of fen.split(" ").slice(0, 3).join(" ")) h = Math.imul(h ^ ch.charCodeAt(0), 16777619);
+  return (h >>> 0).toString(16).padStart(8, "0").slice(0, 4);
+}
+const plyOf = (fen) => { const f = fen.split(" "); return (+f[5] - 1) * 2 + (f[1] === "b" ? 1 : 0); };
+const moveLabel = (ply, san) => `${Math.floor(ply / 2) + 1}${ply % 2 ? "..." : "."} ${san}`;
+function chessChip(m) {
+  const p = m.kind === "dm" && parseChess(m.text); if (!p) return "";
+  const them = contactName(m.peer), out = m.direction === "out";
+  const what = { new: out ? `New game — you're ${p.colour}` : `${them} challenged you — you're ${p.colour === "white" ? "black" : "white"}`,
+    move: p.label, resign: out ? "You resigned" : `${them} resigned`, draw_offer: out ? "You offered a draw" : `${them} offers a draw`,
+    draw_accept: "Draw agreed", sync: out ? "You sent your position" : `${them} sent their position` }[p.kind];
+  return `<a class="chess-chip" href="#/chess/${esc(m.peer)}"><span class="pc">${PAWN}</span> ${esc(what)}</a>`;
+}
+
+// Rebuild every game with this contact from its messages. A move is kept once per
+// ply (a resend or a re-sent copy is the same move); for your own moves a copy
+// that got through wins over one that failed.
+function chessGames(rows) {
+  const games = new Map();
+  for (const m of rows) {
+    const p = parseChess(m.text); if (!p) continue;
+    const mine = m.direction === "out";
+    if (!games.has(p.game)) games.set(p.game, { id: p.game, mine: null, cands: [], moves: new Map(), sync: null, end: null, offer: null, first: m.ts });
+    const g = games.get(p.game);
+    if (p.kind === "new") g.mine = mine ? p.colour : p.colour === "white" ? "black" : "white";
+    else if (p.kind === "move") g.cands.push({ ...p, msg: m, mine });
+    else if (p.kind === "sync") g.sync = { fen: p.fen, ts: m.ts, mine };
+    else if (p.kind === "resign") g.end = g.end || { why: "resign", mine, ts: m.ts };
+    else if (p.kind === "draw_accept") g.end = g.end || { why: "draw", ts: m.ts };
+    else if (p.kind === "draw_offer") g.offer = { mine, ts: m.ts };
+  }
+  for (const g of games.values()) {
+    // A position someone sent replaces everything before it, moves included.
+    for (const mv of g.cands) {
+      if (g.sync && mv.msg.ts < g.sync.ts) continue;
+      const had = g.moves.get(mv.ply);
+      if (!had || (had.msg.status === "failed" && mv.msg.status !== "failed")) g.moves.set(mv.ply, mv);
+    }
+    const c = new Chess();
+    let ply = 0;
+    if (g.sync && c.load(g.sync.fen)) ply = plyOf(g.sync.fen);
+    g.applied = []; g.bad = null; g.gap = null;
+    for (;;) {
+      const mv = g.moves.get(ply);
+      if (!mv) break;
+      const r = c.move(mv.san);
+      if (!r) { g.bad = { mv, why: "illegal" }; break; }
+      g.applied.push({ ...mv, r });
+      if (fenCheck(c.fen()) !== mv.check) { g.bad = { mv, why: "checksum" }; break; }
+      ply++;
+    }
+    const later = [...g.moves.keys()].filter((k) => k > ply);
+    if (!g.bad && later.length) g.gap = ply;
+    // You learn your colour from the "new" message; if that got lost, from your first move.
+    if (!g.mine) { const mv = [...g.moves.values()].find((x) => x.mine); if (mv) g.mine = mv.ply % 2 ? "black" : "white"; }
+    g.chess = c; g.ply = ply;
+    g.last = g.applied[g.applied.length - 1] || null;
+    if (g.offer && g.last && g.last.msg.ts > g.offer.ts) g.offer = null;   // a move after the offer turns it down
+    if (!g.end && c.game_over()) g.end = { why: c.in_checkmate() ? "mate" : c.in_stalemate() ? "stalemate"
+      : c.insufficient_material() ? "material" : c.in_threefold_repetition() ? "repetition" : "draw" };
+  }
+  return [...games.values()].sort((a, b) => a.first - b.first);
+}
+
+const CH = { rows: [], game: null, sel: null, flip: false };
+async function loadChess() {
+  const peer = S.route[1], my = nav;
+  try { const rows = await api(`/chess/${encodeURIComponent(peer)}`); if (my !== nav) return; CH.rows = rows; }
+  catch { if (my === nav) $("#ch-status").textContent = "Can't load the game — the bridge isn't reachable."; return; }
+  renderChess();
+}
+const GLYPH = { k: "♚", q: "♛", r: "♜", b: "♝", n: "♞", p: "♟" };
+function chessStatus(g, them) {
+  const c = g.chess, myTurn = c.turn() === g.mine[0];
+  if (g.end) {
+    const won = g.end.why === "resign" ? !g.end.mine : g.end.why === "mate" ? !myTurn : null;
+    const how = { resign: g.end.mine ? "You resigned" : `${them} resigned`, mate: "Checkmate", stalemate: "Stalemate",
+      material: "Not enough pieces to mate", repetition: "Same position three times", draw: "Draw agreed" }[g.end.why];
+    return `${how} — ${won == null ? "a draw" : won ? "you win" : `${them} wins`}`;
+  }
+  if (g.bad) return `Your boards don't match after ${g.bad.mv.label}.`;
+  if (g.gap != null) return `Waiting for ${moveLabel(g.gap, "…")} — it hasn't arrived yet.`;
+  return (myTurn ? "Your move" : `${them} to move`) + (c.in_check() ? " — check!" : "");
+}
+function ackHtml(mv) {
+  const m = mv.msg;
+  if (!mv.mine) return "";
+  if (m.status === "delivered") return `<span class="st-delivered" title="${esc(dmStatusTip(m))}">✓</span>`;
+  if (m.status === "failed") return `<span class="st-failed" title="${esc(dmStatusTip(m))}">✗</span>`;
+  return `<span class="st-sending" title="${esc(dmStatusTip(m))}">⋯</span>`;
+}
+function renderChess() {
+  const peer = S.route[1], them = contactName(peer);
+  const games = chessGames(CH.rows), g = games[games.length - 1];
+  CH.game = g;
+  const box = $("#ch-board"), acts = $("#ch-actions");
+  if (!g || !g.mine) {
+    $("#ch-status").textContent = g ? `${them} started a game, but their first message is missing.` : `No game with ${them} yet. Pick your colour to send a challenge.`;
+    box.innerHTML = ""; $("#ch-moves").innerHTML = ""; $("#ch-ack").innerHTML = "";
+    acts.innerHTML = `<button class="btn primary" data-ch="new" data-colour="white">Play white</button><button class="btn" data-ch="new" data-colour="black">Play black</button>`;
+    return;
+  }
+  const c = g.chess, black = g.mine === "black" !== CH.flip;
+  const myTurn = !g.end && !g.bad && g.gap == null && c.turn() === g.mine[0];
+  $("#ch-status").textContent = chessStatus(g, them);
+  $("#ch-status").className = "ch-status" + (g.bad || g.gap != null ? " warn" : myTurn ? " go" : "");
+  // board
+  const files = "abcdefgh", targets = new Set(CH.sel ? c.moves({ square: CH.sel, verbose: true }).map((x) => x.to) : []);
+  const last = g.last?.r, inCheck = c.in_check();
+  let html = "";
+  for (let i = 0; i < 64; i++) {
+    const row = black ? i >> 3 : 7 - (i >> 3), col = black ? 7 - (i & 7) : i & 7, sq = files[col] + (row + 1);
+    const p = c.get(sq), dark = (row + col) % 2 === 0;
+    const cls = ["sq", dark ? "d" : "l", sq === CH.sel ? "sel" : "", last && (sq === last.from || sq === last.to) ? "last" : "",
+      targets.has(sq) ? (p ? "hit" : "tgt") : "", inCheck && p?.type === "k" && p.color === c.turn() ? "check" : ""].filter(Boolean).join(" ");
+    const lab = (col === (black ? 7 : 0) ? `<i class="rk">${row + 1}</i>` : "") + (row === (black ? 7 : 0) ? `<i class="fl">${files[col]}</i>` : "");
+    html += `<button type="button" class="${cls}" data-sq="${sq}" aria-label="${sq}${p ? " " + (p.color === "w" ? "white " : "black ") + p.type : ""}">${lab}${p ? `<span class="pc ${p.color}">${GLYPH[p.type]}\uFE0E</span>` : ""}</button>`;
+  }
+  box.innerHTML = html;
+  box.classList.toggle("live", myTurn);
+  // your latest move's receipt
+  const mineLast = [...g.applied].reverse().find((x) => x.mine);
+  $("#ch-ack").innerHTML = mineLast ? (() => { const m = mineLast.msg;
+    const st = m.status === "delivered" ? `<span class="st-delivered">✓ ${esc(them)}'s radio got ${esc(mineLast.label)}</span>${m.rtt_ms ? ` <span class="muted">rtt ${(m.rtt_ms / 1000).toFixed(1)} s</span>` : ""}`
+      : m.status === "failed" ? `<span class="st-failed">✗ No receipt for ${esc(mineLast.label)}</span> <button type="button" class="resend" data-resend="${m.id}">↻ Resend</button>`
+      : `<span class="st-sending">⋯ Sending ${esc(mineLast.label)}, waiting for a receipt</span>`;
+    return st; })() : "";
+  // move list: numbered pairs, your moves carry their receipt mark
+  const pairs = [];
+  for (const mv of g.applied) {
+    const n = Math.floor(mv.ply / 2);
+    pairs[n] = pairs[n] || [null, null];
+    pairs[n][mv.ply % 2] = `<span class="${mv.mine ? "me" : ""}">${esc(mv.san)}${ackHtml(mv)}</span>`;
+  }
+  $("#ch-moves").innerHTML = pairs.map((p, i) => p ? `<li><b>${i + 1}.</b> ${p[0] || "…"} ${p[1] || ""}</li>` : "").join("") || `<li class="muted">No moves yet.</li>`;
+  // actions
+  const b = [];
+  if (g.end) b.push(`<button class="btn primary" data-ch="new" data-colour="${g.mine === "white" ? "black" : "white"}">Rematch (you're ${g.mine === "white" ? "black" : "white"})</button>`);
+  else {
+    if (g.bad) b.push(`<button class="btn primary" data-ch="sync">Send my position</button>`);
+    if (g.offer && !g.offer.mine) b.push(`<button class="btn primary" data-ch="draw ok">Accept draw</button>`);
+    if (!g.offer?.mine) b.push(`<button class="btn" data-ch="draw?">Offer draw</button>`);
+    b.push(`<button class="btn" data-ch="resign">Resign</button>`);
+  }
+  b.push(`<button class="btn" data-ch="flip">Flip board</button>`, `<a class="btn" href="#/dm/${esc(peer)}">Chat</a>`);
+  acts.innerHTML = b.join("");
+  $("#ch-offer").hidden = !(g.offer && !g.end);
+  $("#ch-offer").textContent = g.offer?.mine ? `You offered a draw — waiting for ${them}.` : `${them} offers a draw.`;
+}
+async function chessSend(text) {
+  try { await api("/send", { method: "POST", body: JSON.stringify({ kind: "dm", to: S.route[1], text, sign: false }) }); }
+  catch (err) { fail(err, "Couldn't send"); }
+  loadChess();
+}
+function chessPromote() {
+  return new Promise((resolve) => {
+    showSheet(`<h3 tabindex="-1">Promote to</h3><div class="ch-promo">${["q", "r", "b", "n"].map((t) =>
+      `<button type="button" class="btn" data-promo="${t}">${GLYPH[t]}\uFE0E</button>`).join("")}</div>`);
+    $("#sheet").querySelectorAll("[data-promo]").forEach((el) => (el.onclick = () => { resolve(el.dataset.promo); $("#sheet").close(); }));
+    $("#sheet").addEventListener("close", () => resolve(null), { once: true });
+  });
+}
+$("#ch-board").addEventListener("click", async (e) => {
+  const t = e.target.closest("[data-sq]"), g = CH.game; if (!t || !g?.mine) return;
+  const c = g.chess, sq = t.dataset.sq;
+  if (g.end || g.bad || g.gap != null || c.turn() !== g.mine[0]) return;
+  const p = c.get(sq);
+  if (!CH.sel || (p && p.color === c.turn())) { CH.sel = p && p.color === c.turn() ? sq : null; renderChess(); return; }
+  const legal = c.moves({ square: CH.sel, verbose: true }).filter((x) => x.to === sq);
+  if (!legal.length) { CH.sel = null; renderChess(); return; }
+  const promotion = legal.some((x) => x.promotion) ? await chessPromote() : undefined;
+  if (legal[0].promotion && !promotion) return;
+  const ply = g.ply, r = c.move({ from: CH.sel, to: sq, promotion });
+  CH.sel = null;
+  if (!r) { renderChess(); return; }
+  const text = `♟${g.id} ${moveLabel(ply, r.san)} #${fenCheck(c.fen())}`;
+  c.undo(); renderChess();
+  navigator.vibrate?.(6);
+  chessSend(text);
+});
+$("#ch-actions").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-ch]"); if (!b) return;
+  const a = b.dataset.ch, g = CH.game;
+  if (a === "flip") { CH.flip = !CH.flip; renderChess(); return; }
+  if (a === "new") {
+    const id = Math.random().toString(36).slice(2, 5).padEnd(3, "0");
+    return chessSend(`♟${id} new ${b.dataset.colour}`);
+  }
+  if (a === "resign" && !await confirmSheet("Resign this game?", `${contactName(S.route[1])} wins.`, "Resign", true)) return;
+  if (a === "sync" && !await confirmSheet("Send your position?", "Their board will be replaced with yours, so both match again.", "Send")) return;
+  chessSend(a === "sync" ? `♟${g.id} sync ${g.chess.fen()}` : `♟${g.id} ${a}`);
+});
+$("#v-chess").addEventListener("click", async (e) => {
+  const rs = e.target.closest("[data-resend]"); if (!rs) return;
+  rs.disabled = true; rs.textContent = "…";
+  try { await api(`/messages/${rs.dataset.resend}/resend`, { method: "POST" }); toast("Resent"); }
+  catch (err) { fail(err, "Couldn't resend"); }
+  loadChess();
+});
+$("#chess-btn").onclick = () => (location.hash = `#/chess/${S.route[1]}`);
 
 // ---------- placement mode ----------
 // Live per-repeater signal while you move the antenna. Passive: built from

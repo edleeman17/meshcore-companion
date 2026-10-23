@@ -264,6 +264,11 @@ def messages(kind: str, peer: str, limit: int = 200, hidden: bool = False):
     return db.messages(kind, peer, limit, include_hidden=hidden)
 
 
+@app.get("/api/chess/{peer}")
+def chess_messages(peer: str):
+    return db.chess_messages(peer)
+
+
 @app.get("/api/messages/{kind}/{peer}/hidden-count")
 def hidden_count(kind: str, peer: str):
     return {"hidden": db.hidden_count(kind, peer)}

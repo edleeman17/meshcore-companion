@@ -203,6 +203,11 @@ class DB:
                           (kind, peer, limit))
         return rows[::-1]
 
+    def chess_messages(self, peer: str) -> list[dict]:
+        """Every chess DM with this contact (games outlive the 200-message thread window)."""
+        return self._rows("SELECT * FROM messages WHERE kind='dm' AND peer=? AND text LIKE '♟%' ORDER BY ts, id",
+                          (peer,))
+
     def hidden_count(self, kind: str, peer: str) -> int:
         return self._rows("SELECT COUNT(*) AS n FROM messages WHERE kind=? AND peer=? AND hidden=1",
                           (kind, peer))[0]["n"]

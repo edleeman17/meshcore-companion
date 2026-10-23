@@ -32,6 +32,7 @@
   <button class="back" id="back" hidden aria-label="Back">‹</button>
   <h1 id="title">MeshCore</h1>
   <button class="hdr-btn" id="mute-btn" hidden aria-label="Mute this chat" title="Mute this chat"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a2 2 0 0 0 3.4 0"/></svg></button>
+  <button class="hdr-btn chess-btn" id="chess-btn" hidden aria-label="Play chess" title="Play chess">♞&#xFE0E;</button>
   <button class="hdr-btn" id="info" hidden aria-label="Details">ⓘ</button>
   <button class="hdr-btn" id="find-btn" aria-label="Go anywhere" title="Go anywhere (Ctrl+K)"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></button>
 </header>
@@ -151,6 +152,18 @@
         <button class="btn primary">Run</button>
       </form>
     </div>
+  </section>
+
+  <!-- Chess with one contact: moves are DMs, so each gets a delivery receipt -->
+  <section id="v-chess" class="view" hidden>
+    <p id="ch-status" class="ch-status"></p>
+    <div id="ch-board" class="ch-board" role="grid" aria-label="Chess board"></div>
+    <p id="ch-ack" class="ch-ack"></p>
+    <p id="ch-offer" class="hint" hidden></p>
+    <div id="ch-actions" class="row-actions"></div>
+    <h2 class="sub">Moves</h2>
+    <ol id="ch-moves" class="ch-moves"></ol>
+    <p class="hint">Each move is a short DM, so it gets a delivery receipt: ⋯ sending, ✓ their radio has it, ✗ no receipt. Anyone without the chess board sees moves as text like <code>♟g3k 12. Nf3 #a41c</code>.</p>
   </section>
 
   <!-- Placement mode -->
@@ -367,6 +380,7 @@
 
 <script src="vendor/uPlot.iife.min.js"></script>
 <script src="vendor/leaflet.js"></script>
+<script src="vendor/chess.min.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

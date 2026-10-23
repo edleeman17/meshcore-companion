@@ -76,6 +76,7 @@ A self-hosted web app for your [MeshCore](https://meshcore.io) LoRa radio. A sma
 - Colour-coded **SNR** and **hop count** on every received message. Tap a message for its route, RSSI, round-trip time and sender clock.
 - `@mentions` (tap a name to reply), unread counts, and a badge on the home-screen icon.
 - **Room servers:** posts relayed by a room show their original author.
+- **Chess over LoRa:** tap ♞ in a DM to play a contact who also runs this app. Each move is one short DM (`♟k7q 12. Nf3 #a41c`) with its own delivery receipt, so you see when it lands; other apps just see the move as text. A position checksum on every move catches boards that drift apart, and one tap puts them back in step.
 - **Contact cards:** `<pubkey:type:name>` cards pasted in chat become a one-tap **Add** button, and the 👤 button posts your own card.
 - Full-text search across your history, and an offline banner.
 - **Push notifications** for DMs, mentions and channels you choose (Web Push, including iOS 16.4+ when installed to the home screen).

@@ -2,11 +2,11 @@
 // Caches are shared across the whole origin, so name them per scope: a /beta/
 // preview must never delete production's cache (or vice versa).
 const SCOPE = self.registration.scope;
-const SHELL = "mesh-v63@" + SCOPE;
+const SHELL = "mesh-v64@" + SCOPE;
 const isRoot = new URL(SCOPE).pathname === "/";
 // Relative to this worker, so the same build works at / and in a /beta/ preview.
 const FILES = ["./", "index.html", "app.js", "style.css", "manifest.webmanifest",
-  "vendor/uPlot.iife.min.js", "vendor/uPlot.min.css", "vendor/leaflet.js", "vendor/leaflet.css", "vendor/qrcode.js", "icons/icon-192.png"];
+  "vendor/uPlot.iife.min.js", "vendor/uPlot.min.css", "vendor/leaflet.js", "vendor/leaflet.css", "vendor/qrcode.js", "vendor/chess.min.js", "icons/icon-192.png"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(SHELL).then((c) => c.addAll(FILES)).then(() => self.skipWaiting()));

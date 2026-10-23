@@ -5,6 +5,7 @@ import logging
 
 from pywebpush import WebPushException, webpush
 
+from . import chess
 from .db import DB
 
 log = logging.getLogger("hub")
@@ -47,10 +48,11 @@ class Hub:
             title = f"@ {title}"
         if m["kind"] == "chan":
             title = f"{title} · {m.get('channel_name') or 'channel ' + m['peer']}"
+        move = chess.push_text(m["text"]) if m["kind"] == "dm" else None
         payload = json.dumps({
-            "title": title, "body": m["text"][:200],
+            "title": title, "body": move or m["text"][:200],
             "tag": f"{m['kind']}:{m['peer']}",
-            "url": f"/#/{m['kind']}/{m['peer']}",
+            "url": f"/#/chess/{m['peer']}" if move else f"/#/{m['kind']}/{m['peer']}",
             "badge": self.db.unread_total(),
         })
         for sub in self.db.subs():
