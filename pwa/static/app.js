@@ -2469,7 +2469,10 @@ function renderChess() {
   const b = [];
   if (g.end) b.push(`<button class="btn primary" data-ch="new" data-colour="${g.mine === "white" ? "black" : "white"}">Rematch (you're ${g.mine === "white" ? "black" : "white"})</button>`);
   else {
-    if (g.bad) b.push(`<button class="btn primary" data-ch="sync">Send my position</button>`);
+    // For when their side lost a move (a new device, a cleared app) even though it showed delivered.
+    const lastMine = [...g.applied].reverse().find((x) => x.mine);
+    if (lastMine && !g.bad) b.push(`<button class="btn" data-ch="again" data-mid="${lastMine.msg.id}">Resend ${esc(lastMine.label)}</button>`);
+    b.push(`<button class="btn${g.bad ? " primary" : ""}" data-ch="sync">Send my position</button>`);
     if (g.offer && !g.offer.mine) b.push(`<button class="btn primary" data-ch="draw ok">Accept draw</button>`);
     if (!g.offer?.mine) b.push(`<button class="btn" data-ch="draw?">Offer draw</button>`);
     b.push(`<button class="btn" data-ch="resign">Resign</button>`);
@@ -2519,7 +2522,13 @@ $("#ch-actions").addEventListener("click", async (e) => {
     return chessSend(`♟${id} new ${b.dataset.colour}`);
   }
   if (a === "resign" && !await confirmSheet("Resign this game?", `${contactName(S.route[1])} wins.`, "Resign", true)) return;
-  if (a === "sync" && !await confirmSheet("Send your position?", "Their board will be replaced with yours, so both match again.", "Send")) return;
+  if (a === "again") {
+    b.disabled = true;
+    try { await api(`/messages/${b.dataset.mid}/resend`, { method: "POST" }); toast("Resent"); }
+    catch (err) { fail(err, "Couldn't resend"); }
+    return loadChess();
+  }
+  if (a === "sync" && !await confirmSheet("Send your position?", "Sends the whole board in one message. Their board is replaced with yours, so a device that missed moves catches up.", "Send")) return;
   chessSend(a === "sync" ? `♟${g.id} sync ${g.chess.fen()}` : `♟${g.id} ${a}`);
 });
 $("#v-chess").addEventListener("click", async (e) => {
