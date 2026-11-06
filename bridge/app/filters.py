@@ -13,7 +13,11 @@ Rules (stored in settings "filters"):
 import re
 
 DEFAULTS = {
-    "sender_regex": [r"^[A-Z0-9]{8}$"],   # rotating random 8-char names seen in UK Public spam
+    "sender_regex": [
+        r"^[A-Z0-9]{8}$",                    # rotating random 8-char names seen in UK Public spam
+        r"^(?=[!-`{-~£]{8}$).*[^A-Z0-9/]",   # same, with symbols mixed in (")NT/LQN5", "G0OD£=G9");
+                                             # names that only add "/" (callsign/P1) are left alone
+    ],
     "text_regex": [],
     "flood": True,
     "flood_senders": 3,
