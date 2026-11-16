@@ -2,6 +2,7 @@
 serves the HTTP API (REST + SSE + Web Push) used by the PWA front end.
 """
 import asyncio
+import json
 import logging
 import os
 import statistics
@@ -15,12 +16,15 @@ from pydantic import BaseModel
 
 from meshcore import EventType
 
+from .geo import clean
 from .db import DB, now_ms
 from .hub import Hub
 from .radio import Radio
 from .qrz import CALL_RE, QRZ
 from .watch import CURVES, OTA_TIMEOUT, Watch, battery_type, cell_pct
 from . import topology
+from . import update
+from . import world
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logging.getLogger("meshcore").setLevel(logging.WARNING)
@@ -39,6 +43,10 @@ DATA_DIR = Path(os.environ.get("DATA_DIR", "/var/lib/meshcore-bridge"))
 VAPID_PRIVATE = os.environ.get("VAPID_PRIVATE_KEY", "")
 VAPID_PUBLIC = os.environ.get("VAPID_PUBLIC_KEY", "")
 VAPID_SUBJECT = os.environ.get("VAPID_SUBJECT", "mailto:admin@example.com")
+# Base map: empty = OpenFreeMap vector tiles. Or a TileJSON URL / a .pmtiles file
+# (OpenMapTiles schema, e.g. an offline extract built with Planetiler).
+MAP_TILES = os.environ.get("MAP_TILES", "").strip()
+MAP_GLYPHS = os.environ.get("MAP_GLYPHS", "").strip()   # label fonts URL template, for fully offline maps
 HEALTH_GRACE_SECS = 120
 RANGES = {"1h": 3600, "6h": 6 * 3600, "24h": 86400, "7d": 7 * 86400, "30d": 30 * 86400}
 
@@ -63,7 +71,9 @@ async def lifespan(app):
     task = asyncio.create_task(radio.run())
     watcher = asyncio.create_task(watch.battery_loop())
     offline = asyncio.create_task(watch.offline_loop())
+    updates = asyncio.create_task(update.loop())
     yield
+    updates.cancel()
     task.cancel()
     watcher.cancel()
     offline.cancel()
@@ -109,7 +119,86 @@ def metrics():
 def state():
     return {**radio.state(), "vapid_public_key": VAPID_PUBLIC, "qrz_configured": qrz.configured,
             "notify_channels": db.get_setting("notify_channels", []),
-            "battery_types": db.get_setting("battery_types", {}) or {}}
+            "battery_types": db.get_setting("battery_types", {}) or {},
+            "map_tiles": MAP_TILES, "map_glyphs": MAP_GLYPHS,
+            "version": update.VERSION, "update_available": update.status()["latest"] if update.newer() else None}
+
+
+# ---------- export ----------
+@app.get("/api/export")
+def export_messages(format: str = "csv", kind: str | None = None, peer: str | None = None):
+    """All your messages (or one conversation) as CSV or JSON, streamed in pages so a
+    big history doesn't have to fit in memory."""
+    import csv
+    import io
+    from datetime import datetime, timezone
+    names = {c["prefix"]: c["name"] for c in radio.contacts()}
+    conv = lambda m: (radio.channels.get(int(m["peer"])) or f"channel {m['peer']}") if m["kind"] == "chan" else names.get(m["peer"], m["peer"])
+    cols = ["time", "direction", "kind", "conversation", "sender", "text", "status", "snr", "rssi", "hops"]
+
+    def rows():
+        last = 0
+        where, args = "", []
+        if kind in ("dm", "chan"):
+            where += " AND kind=?"; args.append(kind)
+        if peer:
+            where += " AND peer=?"; args.append(peer)
+        while True:
+            page = db._rows(f"SELECT * FROM messages WHERE id>?{where} ORDER BY id LIMIT 2000", (last, *args))
+            if not page:
+                return
+            for m in page:
+                yield {"time": datetime.fromtimestamp(m["ts"] / 1000, timezone.utc).isoformat(timespec="seconds"),
+                       "direction": m["direction"], "kind": m["kind"], "conversation": conv(m),
+                       "sender": m["sender"] or ("me" if m["direction"] == "out" else ""), "text": m["text"],
+                       "status": m.get("status"), "snr": m.get("snr"), "rssi": m.get("rssi"), "hops": m.get("path_len")}
+            last = page[-1]["id"]
+
+    stamp = datetime.now().strftime("%Y-%m-%d")
+    if format == "json":
+        def gen():
+            yield "["
+            for i, r in enumerate(rows()):
+                yield ("," if i else "") + json.dumps(r, ensure_ascii=False)
+            yield "]"
+        return StreamingResponse(gen(), media_type="application/json",
+                                 headers={"Content-Disposition": f'attachment; filename="meshcore-messages-{stamp}.json"'})
+
+    def gen_csv():
+        buf = io.StringIO(); w = csv.DictWriter(buf, cols)
+        yield "\ufeff"                     # BOM, so Excel opens emoji and accents correctly
+        w.writeheader()
+        for i, r in enumerate(rows()):
+            w.writerow(r)
+            if i % 500 == 0:
+                yield buf.getvalue(); buf.seek(0); buf.truncate()
+        yield buf.getvalue()
+    return StreamingResponse(gen_csv(), media_type="text/csv; charset=utf-8",
+                             headers={"Content-Disposition": f'attachment; filename="meshcore-messages-{stamp}.csv"'})
+
+
+# ---------- public map layer ----------
+@app.get("/api/world")
+async def world_nodes(lat: float | None = None, lon: float | None = None):
+    """Repeaters on your preset near you from map.meshcore.io (fetched on first use, then daily)."""
+    st = radio.state()
+    centre = (st["lat"], st["lon"]) if st.get("lat") or st.get("lon") else ((lat, lon) if lat is not None and lon is not None else None)
+    r = st.get("radio") or {}
+    preset = {"freq": r.get("radio_freq"), "bw": r.get("radio_bw"), "sf": r.get("radio_sf")} if r.get("radio_freq") else None
+    return await asyncio.to_thread(world.nodes, DATA_DIR, centre, preset)
+
+
+# ---------- updates ----------
+@app.get("/api/update")
+def update_status():
+    return update.status()
+
+
+@app.post("/api/update/check")
+async def update_check():
+    if not update.ENABLED:
+        raise HTTPException(409, "Update check is off (UPDATE_CHECK=0)")
+    return await update.check()
 
 
 @app.get("/api/contacts")
@@ -746,8 +835,8 @@ async def self_uri():
 
 @app.get("/api/pending")
 def pending():
-    return [{"public_key": k, "name": c.get("adv_name"), "type": c.get("type"),
-             "lat": c.get("adv_lat"), "lon": c.get("adv_lon")}
+    return [clean({"public_key": k, "name": c.get("adv_name"), "type": c.get("type"),
+             "lat": c.get("adv_lat"), "lon": c.get("adv_lon")})
             for k, c in (radio.mc.pending_contacts.items() if radio.mc else [])]
 
 

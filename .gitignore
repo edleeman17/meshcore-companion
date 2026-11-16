@@ -5,3 +5,4 @@ deploy.env
 *.db
 /deploy
 .env
+.pytest_cache/

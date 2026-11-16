@@ -12,6 +12,7 @@ from collections import deque
 
 from meshcore import EventType, MeshCore
 
+from .geo import clean
 from . import discover, filters, inspect, signing, topology
 from .db import DB, now_ms
 
@@ -100,7 +101,7 @@ class Radio:
             return []
         favs = set(self.db.get_favourites())
         hsz = self.db.heard_hash_sizes()
-        return [{
+        return [clean({
             "public_key": c["public_key"],
             "prefix": c["public_key"][:12],
             "name": c.get("adv_name") or c["public_key"][:8],
@@ -115,7 +116,7 @@ class Radio:
             "heard": (self.watch.last.get(c["public_key"]) if self.watch else None),   # [epoch s, how]
             "hash_size": hsz.get(c["public_key"]),  # 1 = classic, 2 = 2-byte MeshCore (None = unknown)
             "lat": c.get("adv_lat"), "lon": c.get("adv_lon"),
-        } for c in self.mc.contacts.values()]
+        }) for c in self.mc.contacts.values()]
 
     def name_for(self, prefix: str) -> str:
         c = self.mc.get_contact_by_key_prefix(prefix) if self.mc else None

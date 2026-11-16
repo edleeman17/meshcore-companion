@@ -30,6 +30,8 @@ const ago = (ms) => {
 };
 const hhmm = (ms) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const lsGet = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
+const lsSet = (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch { /* private mode */ } };
 // One SNR scale for the whole app (SF8 decodes down to about -12.5 dB).
 const SNR_SCALE = "0 dB or more strong · down to −7 good · −7 to −12 marginal · below −12 mostly lost";
 const snrGrade = (snr) => snr == null ? { cls: "", word: "", leg: "wait" }
@@ -61,6 +63,11 @@ const hueOf = (name) => {
   return (h >>> 0) % 360;
 };
 const tint = (name) => ` style="--h:${hueOf(name)}"`;
+// Avatar tile: neutral (colour is kept for status), the node type as the glyph
+// for repeaters / rooms / sensors, the name's first letter for people.
+const TYPE_GLYPH = { 2: "◆", 3: "▣", 4: "◇" };
+const av = (name, type, extra = "", big = false) =>
+  `<span class="badge${big ? " big" : ""}${TYPE_GLYPH[type] ? " glyph" : ""}">${TYPE_GLYPH[type] || esc(initial(name))}${extra}</span>`;
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 
 // Toasts replace alert(): iOS home-screen apps can suppress native dialogs.
@@ -259,7 +266,7 @@ function go(still = false) {
   else if (tab === "contacts") { if (!split) { $("#v-contacts").hidden = false; $("#title").textContent = "Contacts"; loadContacts(); } }
   else if (tab === "map") { $("#v-map").hidden = false; $("#title").textContent = "Map"; showMap(); }
   else if (tab === "signal") { showSub("signal", parts[1]); loadStats(); if (parts[1] === "packets") loadPackets(); }
-  else if (tab === "radio") { showSub("radio", parts[1]); renderRadio(); fillSettings(); fillFilters(); loadStats(); renderBatteryList(); }
+  else if (tab === "radio") { showSub("radio", parts[1]); renderRadio(); fillSettings(); fillFilters(); loadStats(); renderBatteryList(); if (parts[1] === "about") loadAbout(); }
   else if (!split) { $("#v-chats").hidden = false; $("#title").textContent = "MeshCore"; loadConvs(); }
   syncMuteBtn(); showTicker();
   animateNav(from, parts, before);
@@ -366,7 +373,7 @@ const convRow = (c) => {
   const cur = S.route[0] === c.kind && S.route[1] === c.peer ? ` aria-current="true"` : "";
   const meta = convMeta(c);
   return `<a href="#/${c.kind}/${esc(c.peer)}" class="${cls.trim()}"${cur}>
-    ${c.kind === "chan" ? `<span class="badge chan">#</span>` : `<span class="badge tint"${tint(name)}>${esc(initial(name)) + presenceDot(contactByPrefix(c.peer))}</span>`}
+    ${c.kind === "chan" ? `<span class="badge chan">#</span>` : av(name, contactByPrefix(c.peer)?.type, presenceDot(contactByPrefix(c.peer)))}
     <span class="meta"><div class="name">${esc(name)}${muted ? muteIco : ""}</div><div class="last">${lastLine(c)}</div>${meta ? `<div class="row-meta">${meta}</div>` : ""}</span>
     <span class="when">${c.last_ts ? ago(c.last_ts) : ""}${c.mentions || c.unread ? `<span class="marks">${c.mentions ? '<span class="at" title="You were mentioned">@</span>' : ""}${c.unread ? `<span class="count-badge">${c.unread}</span>` : ""}</span>` : ""}</span></a>`;
 };
@@ -395,7 +402,7 @@ async function loadConvs() {
   const people = S.contacts.filter((c) => c.type === 1 && !seen.has(`dm:${c.prefix}`));
   $("#people-wrap").hidden = !people.length;
   $("#people").innerHTML = people.map((c) => `<a href="#/dm/${c.prefix}"${S.route[0] === "dm" && S.route[1] === c.prefix ? ` aria-current="true"` : ""}>
-      <span class="badge tint"${tint(c.name)}>${esc(initial(c.name))}</span>
+      ${av(c.name, 1)}
       <span class="meta"><div class="name">${esc(c.name)}</div><div class="last">${routeText(c)}</div></span></a>`).join("");
 }
 const loadConvsSoon = debounce(() => { if (S.route[0] === "chats" || (isSplit() && ["dm", "chan"].includes(S.route[0]))) loadConvs(); }, 500);
@@ -416,7 +423,7 @@ $("#search").addEventListener("input", () => {
     try {
       const rows = await api(`/search?q=${encodeURIComponent(q)}`);
       $("#results").innerHTML = rows.map((m) => `<a href="#/${m.kind}/${esc(m.peer)}">
-        ${m.kind === "chan" ? `<span class="badge chan">#</span>` : `<span class="badge tint"${tint(m.where)}>${esc(initial(m.where))}</span>`}
+        ${m.kind === "chan" ? `<span class="badge chan">#</span>` : av(m.where)}
         <span class="meta"><div class="name">${esc(m.where)}${m.sender && m.kind === "chan" ? ` · ${esc(m.sender)}` : ""}</div>
         <div class="last">${esc(m.text)}</div></span><span class="when">${ago(m.ts)}</span></a>`).join("") || `<p class="empty">No messages match "${esc(q)}".</p>`;
     } catch (err) { fail(err, "Search failed"); }
@@ -931,10 +938,11 @@ async function routeMap(m) {
   showSheet(`<h3 id="sheet-title" tabindex="-1" autofocus>Route on map</h3><div id="route-map" class="route-map"></div>
     <p class="hint"><b>${total.toFixed(1)} km</b> over ${legs.length} hop${legs.length !== 1 ? "s" : ""}${crow != null ? ` · ${crow.toFixed(1)} km straight-line` : ""}${missing.length ? ` · ${missing.length} hop(s) not located` : ""}<br>${esc(m.path_names || "direct")}</p>`);
   const rmap = L.map($("#route-map"), { zoomControl: true });
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 18, attribution: "© OpenStreetMap" }).addTo(rmap);
+  addBaseLayer(rmap);
+  $("#sheet").addEventListener("close", () => rmap.remove(), { once: true });   // frees its WebGL context
   const line = pts.map((p) => [p.lat, p.lon]);
-  const col = { sender: css("--link"), hop: css("--warn"), me: css("--fg") };
-  pts.forEach((p, i) => L.circleMarker([p.lat, p.lon], { radius: p.kind === "hop" ? 6 : 8, color: col[p.kind] || css("--muted"), weight: 2, fillOpacity: .6 })
+  const kind = { sender: "person", hop: "rep", me: "you" };
+  pts.forEach((p, i) => L.marker([p.lat, p.lon], { icon: pin(kind[p.kind] || "person", { size: p.kind === "hop" ? 14 : 15 }) })
     .bindPopup(`<b>${esc(p.name)}</b><br>${p.kind === "sender" ? "sender" : p.kind === "me" ? "you" : "repeater"}${p.kind === "hop" ? " · hop " + i : ""}${i ? ` · ${legs[i - 1].toFixed(1)} km from previous` : ""}`).addTo(rmap));
   // Animate the message hopping leg by leg, labelling each leg's distance.
   const grow = L.polyline([], { color: css("--accent"), weight: 3, opacity: .9, dashArray: "6 4" }).addTo(rmap);
@@ -1400,11 +1408,36 @@ async function openPacket(id) {
 
 // ---------- status + radio ----------
 async function refreshState() {
-  S.state = await api("/state"); renderConn();
+  S.state = await api("/state"); renderConn(); noteUpdated();
   $("#pend-badge").hidden = !S.state.pending;
 }
 
+// First run: a short checklist on Chats until everything that makes the app work
+// well is done (or it's hidden). Each open item links to where you fix it.
+function renderSetup() {
+  const el = $("#setup"), s = S.state;
+  if (!el || !s || lsGet("setup-hidden") === "1") { if (el) el.hidden = true; return; }
+  const standalone = matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+  const pushOn = "Notification" in window && Notification.permission === "granted";
+  const items = [
+    [s.connected, "Radio connected", s.connected ? `${esc(s.name || "your radio")} over ${esc(s.link || "the bridge")}` : `Not reachable${s.last_error ? `: ${esc(s.last_error)}` : ""}. Is it powered and in range of the bridge?`, null],
+    [!!(s.lat || s.lon), "Your location", s.lat || s.lon ? "set, so the map centres on you" : "lets the map centre on you and pick nearby repeaters", "#/radio/settings"],
+    [window.isSecureContext, "Secure connection (HTTPS)", window.isSecureContext ? "notifications and offline use can work" : "needed for notifications and offline use: see “Choosing how to open the app” in the README", null],
+    [standalone, "Added to your home screen", standalone ? "opens like an app" : "iPhone: Share → Add to Home Screen (needed there for notifications)", null],
+    [pushOn, "Notifications", pushOn ? "on for this device" : "get told about new messages", "#/radio/notify"],
+  ];
+  const done = items.filter((i) => i[0]).length;
+  if (done === items.length) { el.hidden = true; lsSet("setup-hidden", "1"); return; }
+  el.hidden = false;
+  el.innerHTML = `<div class="setup-head"><b>Getting set up</b><span class="muted">${done} of ${items.length} done</span>
+      <button class="btn sm" id="setup-hide" type="button">Hide</button></div>
+    <ol>${items.map(([ok, t, note, href]) => `<li class="${ok ? "ok" : ""}"><span class="tick">${ok ? "✓" : ""}</span>
+      <span>${!ok && href ? `<a href="${href}">${t}</a>` : t}<small>${note}</small></span></li>`).join("")}</ol>`;
+  $("#setup-hide").onclick = () => { lsSet("setup-hidden", "1"); el.hidden = true; };
+}
+
 function renderConn() {
+  renderSetup();
   const up = S.state?.connected;
   const ob = $("#offline");
   ob.hidden = !!up || !S.state;
@@ -1424,7 +1457,9 @@ function renderStrip() {
   const v = L.battery?.level ? L.battery.level / 1000 : null, pct = v ? cellPct(v, battType(s.public_key)) : null;
   const air = L.core?.uptime_secs ? ((L.radio?.tx_air_secs || 0) / L.core.uptime_secs * 100).toFixed(1) : null;
   const err = L.packets?.recv ? Math.round(100 * (L.packets.recv_errors || 0) / L.packets.recv) : null;
+  const upd = updateToShow();
   const html = [
+    upd ? `<a class="pill warn upd" href="#/radio/about" title="A new version is out">Update v${esc(upd)}</a>` : "",
     `<b>${esc(s.name || "radio")}</b>`,
     d.model ? `<span class="wide-only">${esc(d.model)} · fw ${esc(String(d.ver || "").replace(/-.*/, ""))}</span>` : "",
     r.radio_freq ? `<span>${r.radio_freq} SF${r.radio_sf} BW${r.radio_bw}</span>` : "",
@@ -1750,7 +1785,7 @@ function renderContactList() {
       && (!q || c.name.toLowerCase().includes(q) || c.public_key.startsWith(q)))
     .sort((a, b) => (b.favourite - a.favourite) || (b.last_advert || 0) - (a.last_advert || 0) || a.name.localeCompare(b.name));
   $("#contact-list").innerHTML = list.map((c) => `<a href="#/contact/${c.public_key}"${S.route[0] === "contact" && S.route[1] === c.public_key ? ` aria-current="true"` : ""}>
-    ${c.favourite ? `<span class="badge fav">★${presenceDot(c)}</span>` : `<span class="badge tint"${tint(c.name)}>${esc(initial(c.name))}${presenceDot(c)}</span>`}
+    ${c.favourite ? `<span class="badge fav">★${presenceDot(c)}</span>` : av(c.name, c.type, presenceDot(c))}
     <span class="meta"><div class="name">${esc(c.name)} <span class="tag">${TYPES[c.type] || c.type}</span></div>
     <div class="row-meta">${contactMeta(c)}</div></span>
     <span class="when">${presence(c) ? ago(c.heard[0] * 1000) : c.last_advert ? ago(c.last_advert * 1000) : ""}</span></a>`).join("")
@@ -1796,11 +1831,11 @@ async function loadContacts() {
   const advertOnly = pending.filter((p) => !listed.has(p.public_key));
   $("#nearby").innerHTML = [
     ...heardNot.map((n) => `<label>
-    <span class="badge tint"${tint(n.name || n.pubkey)}>${esc(initial(n.name || n.pubkey))}</span>
+    ${av(n.name || n.pubkey, n.type)}
     <span class="meta"><div class="name">${esc(n.name || n.pubkey.slice(0, 8))} <span class="tag">${TYPES[n.type] || ""}</span> ${callChip(n.name)}</div>
     <div class="row-meta">${n.snr != null ? `<span class="${snrT(n.snr)}">SNR ${fmtDb(n.snr)}</span> · ` : ""}${hopsText(n.path_len)}${n.last_hop && n.last_hop !== "direct" ? " via " + esc(n.last_hop) : ""} · ×${n.count}${n.hash_size === 2 ? " · 2-byte" : ""}${n.lat ? " · 📍" : ""}</div></span>
     <span class="when">${ago(n.last_ts)} <button class="btn sm" data-addkey="${n.pubkey}">Add</button></span></label>`),
-    ...advertOnly.map((p) => `<label><span class="badge tint"${tint(p.name)}>${esc(initial(p.name))}</span>
+    ...advertOnly.map((p) => `<label>${av(p.name, p.type)}
     <span class="meta"><div class="name">${esc(p.name)} <span class="tag">${TYPES[p.type] || ""}</span></div><div class="row-meta">advert waiting to be added${p.lat ? " · 📍" : ""}</div></span>
     <span class="when"><button class="btn sm primary" data-addkey="${p.public_key}">Add</button></span></label>`),
   ].join("") || `<p class="empty">Nothing new heard in the last ${nearbyHours === 1 ? "hour" : nearbyHours + " hours"}. Nodes advertise every few hours.</p>`;
@@ -2220,7 +2255,7 @@ async function openContact(key) {
   $("#title").textContent = c.name;
   const isChat = c.type === 1, isNode = c.type === 2 || c.type === 3 || c.type === 4;
   const pr = presence(c), nb = S.nearBy?.get(c.public_key);
-  $("#c-hero").innerHTML = `${c.favourite ? `<span class="badge big fav">★${presenceDot(c)}</span>` : `<span class="badge big tint"${tint(c.name)}>${esc(initial(c.name))}${presenceDot(c)}</span>`}
+  $("#c-hero").innerHTML = `${c.favourite ? `<span class="badge big fav">★${presenceDot(c)}</span>` : av(c.name, c.type, presenceDot(c), true)}
     <div class="c-headtxt"><div class="hero-name">${esc(c.name)} ${callChip(c.name)}</div>
     <div class="row-meta">${esc(TYPES[c.type] || "node")} · ${c.hash_size === 2 ? "2-byte" : "1-byte"} hashes · key <button type="button" class="key-copy" data-copy="${c.public_key}" title="Copy the full key">${c.public_key.slice(0, 12)}…</button></div></div>`;
   const heardTs = pr ? c.heard[0] * 1000 : c.last_advert ? c.last_advert * 1000 : 0;
@@ -2703,6 +2738,150 @@ function renderSpots() {
   };
 }
 
+// ---------- base map ----------
+// Vector tiles drawn by MapLibre inside Leaflet, coloured from the theme tokens,
+// so the map follows every palette and light/dark. Tiles: OpenFreeMap (global,
+// free, no key) unless the bridge sets MAP_TILES (a TileJSON URL or a .pmtiles
+// file, e.g. an offline extract). No WebGL, or MapLibre fails to load: the old
+// OSM raster, toned down by CSS.
+const OSM = '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>';
+const vendorUrl = (f) => new URL("vendor/" + f, document.baseURI).href;
+const hasWebGL = (() => { try { const c = document.createElement("canvas"); return !!(c.getContext("webgl2") || c.getContext("webgl")); } catch { return false; } })();
+let mglLoad = null;
+function loadMapLibre() {
+  return (mglLoad ||= (async () => {
+    const l = document.createElement("link"); l.rel = "stylesheet"; l.href = vendorUrl("maplibre-gl.css"); document.head.append(l);
+    const m = await import(vendorUrl("maplibre-gl.esm.js"));
+    m.setWorkerUrl(vendorUrl("maplibre-gl-worker.esm.js"));
+    window.maplibregl = m;                                    // the Leaflet plugin reads this global
+    await loadScript(vendorUrl("leaflet-maplibre-gl.js"));
+    if (/\.pmtiles(\?|$)/.test(S.state?.map_tiles || "")) {
+      await loadScript(vendorUrl("pmtiles.js"));
+      m.addProtocol("pmtiles", new pmtiles.Protocol().tile);
+    }
+    return m;
+  })().catch((e) => { mglLoad = null; throw e; }));
+}
+const rgbOf = (c) => {
+  c = (c || "").trim();
+  if (c[0] === "#") { let h = c.slice(1); if (h.length <= 4) h = [...h].map((x) => x + x).join(""); return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16)); }
+  const m = c.match(/[\d.]+/g); return m ? m.slice(0, 3).map(Number) : [128, 128, 128];
+};
+const mixCol = (a, b, t) => { const x = rgbOf(a), y = rgbOf(b); return `rgb(${x.map((v, i) => Math.round(v + (y[i] - v) * t)).join(",")})`; };
+
+function mapStyle() {
+  const t = {};
+  for (const k of ["bg", "surface", "surface-2", "fg", "muted", "faint", "line", "line-strong", "link"]) t[k] = css("--" + k);
+  const dark = rgbOf(t.bg).reduce((a, b) => a + b, 0) < 384;   // water sits below the land in dark themes
+  const water = dark ? mixCol(t.bg, t.link, .14) : mixCol(t["surface-2"], t.link, .3), green = mixCol(t.bg, t.surface, .8);
+  const minor = t["line-strong"], major = mixCol(t["line-strong"], t.faint, .55), motorway = mixCol(t.faint, t.muted, .5);
+  const src = (S.state?.map_tiles || "").trim();
+  const source = /\.pmtiles(\?|$)/.test(src) ? { type: "vector", url: "pmtiles://" + new URL(src, document.baseURI).href, attribution: OSM }
+    : src ? { type: "vector", url: src, attribution: OSM }
+    : { type: "vector", url: "https://tiles.openfreemap.org/planet", attribution: `<a href="https://openfreemap.org">OpenFreeMap</a> ${OSM}` };
+  const poly = ["match", ["geometry-type"], ["Polygon", "MultiPolygon"], true, false];
+  const lines = ["match", ["geometry-type"], ["LineString", "MultiLineString"], true, false];
+  const cls = (...c) => ["match", ["get", "class"], c, true, false];
+  const notTunnel = ["!=", ["get", "brunnel"], "tunnel"];
+  const width = (...stops) => ["interpolate", ["exponential", 1.5], ["zoom"], ...stops];
+  const road = (id, classes, color, stops, extra = {}) => ({ id, type: "line", source: "omt", "source-layer": "transportation",
+    filter: ["all", lines, notTunnel, cls(...classes)], layout: { "line-cap": "butt", "line-join": "round" },
+    paint: { "line-color": color, "line-width": width(...stops), ...extra.paint }, ...(extra.minzoom ? { minzoom: extra.minzoom } : {}) });
+  const name = ["coalesce", ["get", "name:latin"], ["get", "name"]];
+  const place = (id, classes, size, color, opts = {}) => ({ id, type: "symbol", source: "omt", "source-layer": "place",
+    filter: cls(...classes), ...(opts.minzoom ? { minzoom: opts.minzoom } : {}),
+    layout: { "text-field": name, "text-font": [opts.bold ? "Noto Sans Bold" : "Noto Sans Regular"], "text-size": size,
+      "text-max-width": 8, "text-transform": opts.caps ? "uppercase" : "none", "text-letter-spacing": opts.caps ? .12 : 0 },
+    paint: { "text-color": color, "text-halo-color": t.bg, "text-halo-width": 1.5 } });
+  return {
+    version: 8,
+    glyphs: S.state?.map_glyphs || "https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf",
+    sources: { omt: source },
+    layers: [
+      { id: "bg", type: "background", paint: { "background-color": t.bg } },
+      { id: "green", type: "fill", source: "omt", "source-layer": "landcover", filter: ["all", poly, cls("wood", "grass")], paint: { "fill-color": green } },
+      { id: "park", type: "fill", source: "omt", "source-layer": "park", filter: poly, paint: { "fill-color": green } },
+      { id: "water", type: "fill", source: "omt", "source-layer": "water", filter: ["all", poly, notTunnel], paint: { "fill-color": water } },
+      { id: "waterway", type: "line", source: "omt", "source-layer": "waterway", filter: ["all", lines, notTunnel],
+        paint: { "line-color": water, "line-width": width(10, .5, 16, 3) } },
+      { id: "building", type: "fill", source: "omt", "source-layer": "building", minzoom: 14,
+        paint: { "fill-color": t.surface, "fill-outline-color": t.line } },
+      { id: "boundary", type: "line", source: "omt", "source-layer": "boundary",
+        filter: ["all", ["<=", ["get", "admin_level"], 4], ["!=", ["get", "maritime"], 1]],
+        paint: { "line-color": t.faint, "line-width": 1, "line-dasharray": [4, 3] } },
+      road("road-path", ["path", "track"], minor, [14, .5, 18, 1.5], { minzoom: 14, paint: { "line-dasharray": [2, 2] } }),
+      road("road-minor", ["minor", "service"], minor, [12, .4, 18, 9]),
+      road("road-major", ["primary", "secondary", "tertiary", "trunk"], major, [7, .5, 18, 13]),
+      road("road-motorway", ["motorway"], motorway, [5, .6, 18, 15]),
+      { id: "rail", type: "line", source: "omt", "source-layer": "transportation", filter: ["all", lines, notTunnel, cls("rail")],
+        paint: { "line-color": t.faint, "line-width": 1, "line-dasharray": [3, 3] } },
+      { id: "water-name", type: "symbol", source: "omt", "source-layer": "water_name",
+        layout: { "text-field": name, "text-font": ["Noto Sans Italic"], "text-size": 11, "text-max-width": 8 },
+        paint: { "text-color": mixCol(t.muted, t.link, .5), "text-halo-color": t.bg, "text-halo-width": 1.2 } },
+      { id: "road-name", type: "symbol", source: "omt", "source-layer": "transportation_name", minzoom: 14,
+        filter: cls("primary", "secondary", "tertiary", "minor", "trunk"),
+        layout: { "text-field": name, "text-font": ["Noto Sans Regular"], "text-size": 10, "symbol-placement": "line" },
+        paint: { "text-color": t.faint, "text-halo-color": t.bg, "text-halo-width": 1.2 } },
+      place("place-small", ["suburb", "neighbourhood", "hamlet", "quarter"], 10, t.faint, { minzoom: 12 }),
+      place("place-village", ["village"], 11, t.muted, { minzoom: 10 }),
+      place("place-town", ["town"], 12, t.muted, { caps: true }),
+      place("place-city", ["city"], 13, t.fg, { caps: true, bold: true }),
+      place("place-country", ["country", "state"], 12, t.muted, { caps: true, bold: true }),
+    ],
+  };
+}
+
+// Adds the themed base map to a Leaflet map; falls back to the raster tiles.
+const glBases = new Set();
+async function addBaseLayer(m) {
+  const raster = () => L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+    { maxZoom: 18, attribution: OSM, className: "tiles-raster" }).addTo(m);
+  if (!hasWebGL) return raster();
+  try {
+    await loadMapLibre();
+    if (!m._container?.isConnected) return;                 // sheet closed while loading
+    const gl = L.maplibreGL({ style: mapStyle() }).addTo(m);
+    glBases.add(gl);
+    m.on("unload", () => glBases.delete(gl));
+  } catch (e) {
+    console.warn("vector map unavailable, using raster", e);
+    raster();
+  }
+}
+// Theme or palette changed: recolour every live vector base map in place.
+function restyleBaseMaps() {
+  for (const gl of glBases) { try { gl.getMaplibreMap()?.setStyle(mapStyle()); } catch { /* not ready yet */ } }
+}
+
+// Square pins to match the flat look: person = square, repeater = diamond,
+// room = square with a centre mark, sensor = small square. Saved contacts are
+// filled, nodes only heard are hollow. Colour comes from CSS (--pc).
+const PIN_KIND = { 1: "person", 2: "rep", 3: "room", 4: "sensor" };
+const pin = (kind, { filled = true, size = 14, colour } = {}) => L.divIcon({
+  className: "pin-wrap", iconSize: [size, size], iconAnchor: [size / 2, size / 2], popupAnchor: [0, -size / 2],
+  html: `<i class="pin pin-${kind}${filled ? " on" : ""}"${colour ? ` style="--pc:${colour}"` : ""}></i>`,
+});
+
+// Node pins drawn on one shared canvas: a busy area has 800+ nodes, and that many
+// HTML pins makes older phones stutter. Same shapes as the CSS pins and legend.
+const ShapeMarker = L.CircleMarker.extend({
+  _updatePath() {
+    const r = this._renderer;
+    if (!r._drawing || this._empty()) return;
+    const p = this._point, s = Math.max(2, Math.round(this._radius)), ctx = r._ctx, o = this.options;
+    ctx.beginPath();
+    if (o.shape === "diamond") { ctx.moveTo(p.x, p.y - s); ctx.lineTo(p.x + s, p.y); ctx.lineTo(p.x, p.y + s); ctx.lineTo(p.x - s, p.y); ctx.closePath(); }
+    else ctx.rect(p.x - s, p.y - s, 2 * s, 2 * s);
+    r._fillStroke(ctx, this);
+    if (o.shape === "room" && o.fillOpacity >= 1) {   // the centre mark of a room pin
+      const m = Math.max(1, Math.round(s * .35)); ctx.globalAlpha = 1; ctx.fillStyle = o.markColor; ctx.fillRect(p.x - m, p.y - m, 2 * m, 2 * m);
+    }
+  },
+});
+const SHAPE = { 1: ["square", "--link"], 2: ["diamond", "--fg"], 3: ["room", "--ok"], 4: ["square", "--warn"] };
+let nodeRenderer, worldRenderer, worldLayer, worldCount = null;
+const pinScale = () => (map && map.getZoom() < 10 ? .65 : 1);
+
 // ---------- map ----------
 // Plots your contacts plus every node heard advertising with a location
 // (including repeaters you've heard but never saved as contacts).
@@ -2711,7 +2890,15 @@ async function showMap() {
   const my = nav;
   if (!map) {
     map = L.map("map", { zoomControl: true, attributionControl: true }).setView([S.state?.lat || 51.5, S.state?.lon || -0.1], S.state?.lat ? 11 : 6);
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 18, attribution: "© OpenStreetMap" }).addTo(map);
+    addBaseLayer(map);
+    worldRenderer = L.canvas({ padding: .4, tolerance: 4 });   // created first, so it sits under your own nodes
+    nodeRenderer = L.canvas({ padding: .4, tolerance: 4 });
+    worldLayer = L.layerGroup().addTo(map);
+    const zoomClass = () => {                                   // smaller pins zoomed out
+      map.getContainer().classList.toggle("z-far", map.getZoom() < 10);
+      for (const g of [layer, worldLayer]) g?.eachLayer((l) => l.options.base && l.setRadius(l.options.base * pinScale()));
+    };
+    map.on("zoomend", zoomClass); zoomClass();
     layer = L.layerGroup().addTo(map);
     legend = L.control({ position: "bottomleft" });
     legend.onAdd = () => {
@@ -2725,10 +2912,12 @@ async function showMap() {
     const live = L.control({ position: "topright" });
     live.onAdd = () => {
       const d = L.DomUtil.create("div", "map-live");
-      d.innerHTML = `<label><input type="checkbox" id="trail-on" ${TR.on ? "checked" : ""}> Live packets</label>
-        <label><input type="checkbox" id="links-on" ${TR.links ? "checked" : ""}> Links heard (24 h)</label><div id="trail-log" aria-live="polite"></div>`;
+      d.innerHTML = `<div class="map-chips"><label class="chip-tog"><input type="checkbox" id="trail-on" ${TR.on ? "checked" : ""}>Live packets</label>
+        <label class="chip-tog"><input type="checkbox" id="links-on" ${TR.links ? "checked" : ""}>Links 24 h</label>
+        <label class="chip-tog" title="Repeaters on your preset from map.meshcore.io, including ones you've never heard"><input type="checkbox" id="world-on" ${TR.world ? "checked" : ""}>Public map</label></div><div id="trail-log" aria-live="polite"></div>`;
       L.DomEvent.disableClickPropagation(d);
       d.querySelector("#links-on").onchange = (e) => { TR.links = e.target.checked; try { localStorage.links = TR.links ? "1" : "0"; } catch {} drawLinks(); };
+      d.querySelector("#world-on").onchange = (e) => { TR.world = e.target.checked; try { localStorage.world = TR.world ? "1" : "0"; } catch {} drawWorld(); };
       d.querySelector("input").onchange = (e) => { TR.on = e.target.checked; try { localStorage.trails = TR.on ? "1" : "0"; } catch {} if (!TR.on) trails.clearLayers(); };
       return d;
     };
@@ -2739,34 +2928,46 @@ async function showMap() {
   try { heard = await api("/nearby?hours=168"); } catch { /* contacts only */ }
   if (my !== nav) return;
   layer.clearLayers();
-  const colour = { 1: css("--link"), 2: css("--accent"), 3: css("--ok"), 4: css("--warn") };
   const nodes = new Map();
   for (const n of heard) if (n.lat || n.lon) nodes.set(n.pubkey, { key: n.pubkey, name: n.name || n.pubkey.slice(0, 8), type: n.type, lat: n.lat, lon: n.lon, snr: n.snr, last: n.last_ts, contact: n.is_contact,
     hops: n.path_len, via: n.last_hop, count: n.count, hash: n.hash_size });
   for (const c of S.contacts) if (c.lat || c.lon) nodes.set(c.public_key, { ...(nodes.get(c.public_key) || {}), key: c.public_key, name: c.name, type: c.type, lat: c.lat, lon: c.lon, contact: true });
-  mapNodes = [...nodes.values()];
+  // Adverts can carry nonsense (lon 2081, 0,0, a "Santa" at the pole): drop impossible
+  // positions, and frame the view on what's near you rather than the whole world.
+  const okPos = (n) => Math.abs(n.lat) <= 85 && Math.abs(n.lon) <= 180 && !(Math.abs(n.lat) < .01 && Math.abs(n.lon) < .01);
+  mapNodes = [...nodes.values()].filter(okPos);
+  const me = S.state?.lat ? [S.state.lat, S.state.lon] : null;
   const pts = [];
-  for (const n of nodes.values()) {
-    pts.push([n.lat, n.lon]);
+  for (const n of mapNodes) {
+    if (!me || kmBetween(me, [n.lat, n.lon]) < 50) pts.push([n.lat, n.lon]);
     const link = n.contact ? `<br><a href="#/contact/${n.key}">Open contact</a>` : "";
     const meta = [TYPES[n.type] || "node", n.snr != null && `<span class="${snrT(n.snr)}">SNR ${fmtDb(n.snr)}</span>`,
       n.hops != null && hopsText(n.hops) + (n.via && n.via !== "direct" ? ` via ${esc(n.via)}` : ""), n.count && `×${n.count}`,
       n.last && `heard ${ago(n.last)} ago`, n.hash === 2 && "2-byte", n.key.slice(0, 8)].filter(Boolean).join(" · ");
-    L.circleMarker([n.lat, n.lon], { radius: n.type === 2 ? 8 : 6, color: colour[n.type] || css("--muted"), weight: 2, fillOpacity: n.contact ? .55 : .25 })
+    const [shape, col] = SHAPE[n.type] || SHAPE[1], base = n.contact ? (n.type === 2 ? 8 : 6.5) : 5;
+    // Fade by how long since you last heard it, so today's mesh stands out from last week's.
+    const age = n.last ? (Date.now() - n.last) / 3600_000 : 0;
+    const fade = age < 1 ? 0 : age < 24 ? .2 : age < 72 ? .5 : .7, ink = mixCol(css(col), css("--bg"), fade);
+    new ShapeMarker([n.lat, n.lon], { renderer: nodeRenderer, shape, base, radius: base * pinScale(), color: ink, weight: n.contact ? 2 : 1.5,
+      fill: true, fillColor: n.contact ? ink : css("--bg"), fillOpacity: 1, markColor: css("--bg"), lineJoin: "miter" })
       .bindPopup(`<b>${esc(n.name)}</b><div class="row-meta">${meta}</div>${link}`)
       .addTo(layer);
   }
   if (S.state?.lat) {
     pts.push([S.state.lat, S.state.lon]);
-    L.circleMarker([S.state.lat, S.state.lon], { radius: 9, color: css("--fg"), weight: 3, fillOpacity: .9 }).bindPopup("You").addTo(layer);
+    L.marker([S.state.lat, S.state.lon], { icon: pin("you", { size: 16 }), title: "You", zIndexOffset: 1000 }).bindPopup("You").addTo(layer);
   }
   const byType = (t) => mapNodes.filter((n) => n.type === t).length;
-  $("#map-legend").innerHTML = `<span><i class="lg-you"></i>You</span><span><i class="lg-rep"></i>Repeaters <b>${byType(2)}</b></span>
-    <span><i class="lg-person"></i>People <b>${byType(1)}</b></span><span><i class="lg-room"></i>Rooms <b>${byType(3)}</b></span>`;
+  const sw = (k) => `<i class="pin pin-${k} on"></i>`;
+  $("#map-legend").innerHTML = `<span>${sw("you")}You</span><span>${sw("rep")}Repeaters <b>${byType(2)}</b></span>
+    <span>${sw("person")}People <b>${byType(1)}</b></span><span>${sw("room")}Rooms <b>${byType(3)}</b></span>
+    <span class="lg-note"><i class="pin pin-person"></i>hollow = heard, not saved</span>
+    <span class="lg-note"><i class="pin pin-person on lg-faded"></i>faded = not heard today</span>`;
   if (S.focus) { map.setView([S.focus.lat, S.focus.lon], 13); S.focus = null; }
   else if (pts.length > 1) map.fitBounds(pts, { padding: [30, 30], maxZoom: 13 });
   else if (pts.length) map.setView(pts[0], 11);
   drawLinks();
+  drawWorld();
   if (S.replay) { const p = S.replay; S.replay = null; setTimeout(() => trailPacket(p, true), 300); }
 }
 
@@ -2775,7 +2976,8 @@ async function showMap() {
 // prefixes, so we pick the located node with that prefix nearest the next point
 // back along the path (the last hop is near you), preferring repeaters.
 const TR = { on: (() => { try { return localStorage.trails !== "0"; } catch { return true; } })(), running: 0,
-  links: (() => { try { return localStorage.links === "1"; } catch { return false; } })() };
+  links: (() => { try { return localStorage.links === "1"; } catch { return false; } })(),
+  world: (() => { try { return localStorage.world === "1"; } catch { return false; } })() };
 const TRAIL_MS = 900;   // per leg
 
 const kmBetween = (a, b) => {
@@ -2785,6 +2987,36 @@ const kmBetween = (a, b) => {
 
 // Repeater-to-repeater links from every path heard in the last day (bridge
 // /api/topology). Thicker = more packets; links to you are coloured by SNR.
+// "Public map": repeaters and rooms on your preset from map.meshcore.io that your
+// radio hasn't heard, as small grey outlines under your own nodes. The bridge
+// fetches the list on first use (a few seconds), then once a day.
+async function drawWorld() {
+  if (!worldLayer) return;
+  worldLayer.clearLayers(); worldCount = null; legendWorld();
+  if (!TR.world) return;
+  const c = map.getCenter(), slow = setTimeout(() => toast("Loading the public map…"), 600);
+  let w; try { w = await api(`/world?lat=${c.lat.toFixed(3)}&lon=${c.lng.toFixed(3)}`); } catch { clearTimeout(slow); return toast("Couldn't load the public map", "err"); }
+  clearTimeout(slow);
+  if (!TR.world) return;
+  const mine = new Set(mapNodes.map((n) => n.key.slice(0, 12))), ink = css("--faint"), bg = css("--bg");
+  let n = 0;
+  for (const x of w.nodes) {
+    if (mine.has(x.key)) continue;
+    n++;
+    new ShapeMarker([x.lat, x.lon], { renderer: worldRenderer, shape: x.type === 3 ? "room" : "diamond", base: 4, radius: 4 * pinScale(),
+      color: ink, weight: 1.2, fill: true, fillColor: bg, fillOpacity: .9, markColor: bg, lineJoin: "miter" })
+      .bindPopup(`<b>${esc(x.name || x.key)}</b><div class="row-meta">${x.type === 3 ? "room" : "repeater"} · from the public map · not heard by you · advert ${ago(x.last * 1000)} ago</div>`)
+      .addTo(worldLayer);
+  }
+  worldCount = n; legendWorld();
+  if (w.error && !w.nodes.length) toast("Public map unavailable: " + w.error, "err");
+}
+function legendWorld() {
+  const el = $("#map-legend"); if (!el) return;
+  el.querySelector(".lg-world")?.remove();
+  if (worldCount != null) el.insertAdjacentHTML("beforeend", `<span class="lg-note lg-world"><i class="pin pin-rep"></i>public map, not heard <b>${worldCount}</b></span>`);
+}
+
 async function drawLinks() {
   if (!links) return;
   links.clearLayers();
@@ -2799,8 +3031,8 @@ async function drawLinks() {
     const a = at.get(e.a), b = at.get(e.b); if (!a || !b) continue;
     const mine = e.a === "me" || e.b === "me";
     L.polyline([[a.lat, a.lon], [b.lat, b.lon]], {
-      renderer: r, color: mine ? grade[qClass(e.snr)] || css("--fg") : css("--link"),
-      weight: Math.min(1 + Math.log2(e.count), 7), opacity: mine ? .9 : .45,
+      renderer: r, color: mine ? grade[qClass(e.snr)] || css("--fg") : css("--muted"),
+      weight: Math.min(1 + Math.log2(e.count), 7), opacity: mine ? .9 : .5, dashArray: mine ? null : "4 4",
     }).bindPopup(`<b>${esc(a.name)} ↔ ${esc(b.name)}</b><br>${e.count} packets relayed · last ${hhmm(e.last)}${e.snr != null ? `<br>you hear it at ${e.snr} dB` : ""}`)
       .addTo(links);
   }
@@ -2842,7 +3074,7 @@ function trailPacket(p, replay = false) {
   if (replay) map.fitBounds(known.map((k) => k.ll), { padding: [40, 40], maxZoom: 13 });
   const colour = { GRP_TXT: css("--accent"), TEXT_MSG: css("--accent"), ADVERT: css("--link"), ACK: css("--ok") }[p.ptype] || css("--warn");
   const line = L.polyline([known[0].ll], { color: colour, weight: 3, opacity: .85, className: "trail" }).addTo(trails);
-  const dot = L.circleMarker(known[0].ll, { radius: 5, color: colour, weight: 2, fillColor: colour, fillOpacity: 1 }).addTo(trails);
+  const dot = L.marker(known[0].ll, { icon: pin("dot", { size: 9, colour }), interactive: true, zIndexOffset: 500 }).addTo(trails);
   dot.bindTooltip(known.map((k) => k.name).join(" → "));
   TR.running++;
   let leg = 0, t0 = performance.now();
@@ -2852,13 +3084,13 @@ function trailPacket(p, replay = false) {
     dot.setLatLng(ll);
     const lls = line.getLatLngs(); lls[leg + 1] = L.latLng(ll); line.setLatLngs(lls);
     if (f >= 1) {
-      L.circleMarker(b, { radius: 9, color: colour, weight: 2, fillOpacity: 0, className: "trail-ping" }).addTo(trails);
+      L.marker(b, { icon: pin("ping", { size: 22, colour, filled: false }), interactive: false, ping: true }).addTo(trails);
       leg++; t0 = now;
     }
     if (leg < known.length - 1) return requestAnimationFrame(step);
     TR.running--;
     setTimeout(() => { trails.removeLayer(line); trails.removeLayer(dot); }, 4000);
-    setTimeout(() => trails.eachLayer((l) => l.options.className === "trail-ping" && trails.removeLayer(l)), 1200);
+    setTimeout(() => trails.eachLayer((l) => l.options.ping && trails.removeLayer(l)), 1200);
   };
   requestAnimationFrame(step);
 }
@@ -3034,6 +3266,7 @@ function applyTheme(t = themePref, pal = palettePref) {
   document.querySelectorAll('meta[name="theme-color"]').forEach((m) => m.setAttribute("content", bg));
   if (["signal", "radio"].includes(S.route[0])) loadStats();   // charts take their colours at draw time
   if (typeof menuValues === "function") menuValues();
+  restyleBaseMaps();
   if (S.route[0] === "map" && map) showMap();
 }
 $("#theme").onclick = (e) => { const t = e.target.dataset.theme; if (t) applyTheme(t); };
@@ -3080,12 +3313,67 @@ function menuValues() {
     filters: S.filterSummary || "",
     appearance: `${PALETTES.find((x) => x.id === palettePref)?.name || "Kanagawa"} · ${themePref}`,
     maintenance: L.core?.uptime_secs ? `up ${durText(L.core.uptime_secs)}` : "",
+    about: s.version ? (s.update_available ? `v${s.update_available} out` : `v${s.version}`) : "",
     placement: h?.best?.name ? `best ${h.best.name} ${fmtDb(h.best.snr_avg)}` : "",
     charts: h ? [h.err_pct != null && `err ${h.err_pct}%`, h.tx_pct_last_hour != null && `air ${h.tx_pct_last_hour}%`].filter(Boolean).join(" · ") : "",
     heard: st ? `${st.neighbours.filter((n) => !["direct", "?"].includes(n.name)).length} repeaters` : "",
     packets: st?.hourly?.length && st.hourly.at(-1).pkts_per_min != null ? `${st.hourly.at(-1).pkts_per_min}/min` : "",
   };
   document.querySelectorAll("[data-mv]").forEach((el) => (el.textContent = vals[el.dataset.mv] || ""));
+}
+
+// ---------- About and updates ----------
+// The bridge checks GitHub for a newer release every 12 h (/api/update). A new one
+// shows as a pill at the front of the status strip until it's installed or skipped.
+const updateToShow = () => { const u = S.state?.update_available; return u && lsGet("skip-update") !== u ? u : null; };
+const UPDATE_CMD = {
+  script: "cd meshcore-companion && git pull && ./install.sh",
+  docker: "cd meshcore-companion && git pull && docker compose up -d --build",
+};
+// Once per new version: say it updated, and point at what's new.
+function noteUpdated() {
+  const v = S.state?.version; if (!v) return;
+  const seen = lsGet("seen-version");
+  if (seen && seen !== v) toast(`Updated to v${v} · Radio → About for what's new`);
+  lsSet("seen-version", v);
+}
+async function loadAbout(force = false) {
+  const el = $("#about"), my = nav;
+  let u;
+  try { u = force ? await api("/update/check", { method: "POST" }) : await api("/update"); }
+  catch (e) { if (my === nav) el.innerHTML = `<p class="empty">Couldn't reach the bridge: ${esc(e.message || e)}</p>`; return; }
+  if (my !== nav) return;
+  if (u.newer !== !!S.state?.update_available) { S.state = { ...S.state, update_available: u.newer ? u.latest : null }; renderStrip(); menuValues(); }
+  const when = (iso) => iso ? new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : "";
+  const cmd = UPDATE_CMD[u.method] || UPDATE_CMD.script;
+  const rows = [
+    ["This install", `v${esc(u.current)}`],
+    ["Latest release", u.latest ? `v${esc(u.latest)}${u.published ? ` <span class="muted">· ${when(u.published)}</span>` : ""}` : "–"],
+    ["Installed with", u.method === "docker" ? "Docker" : "install.sh"],
+    ["Last checked", !u.enabled ? "off (UPDATE_CHECK=0)" : u.checked ? `${ago(u.checked * 1000) === "now" ? "just now" : ago(u.checked * 1000) + " ago"}${u.error ? ` <span class="q-ok-t">· failed: ${esc(u.error)}</span>` : ""}` : "not yet"],
+  ];
+  const status = !u.enabled ? `<p class="hint">Update checks are off on this bridge.</p>`
+    : u.newer ? `<div class="upd-box"><b>v${esc(u.latest)} is out.</b> You're on v${esc(u.current)}.</div>`
+    : u.latest ? `<p class="hint"><span class="pill up">Up to date</span></p>` : "";
+  el.innerHTML = `${status}
+    <h2 class="sub">Version</h2>
+    <dl class="about-kv">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>
+    ${u.newer ? `<h2 class="sub">How to update</h2>
+      <p class="hint">On the machine that runs the bridge${u.method === "docker" ? "" : " (e.g. the Pi)"}:</p>
+      <div class="cmd"><code class="sel">${esc(cmd)}</code><button class="btn sm" id="copy-cmd">Copy</button></div>
+      <p class="hint">Your radio, pairing, messages and settings are kept. The radio link drops for about 30 s, then reopen the app.</p>` : ""}
+    ${u.notes ? `<h2 class="sub">${u.newer ? "What's new" : "This release"} <small>v${esc(u.latest)}</small></h2><pre class="notes">${esc(u.notes)}</pre>` : ""}
+    <div class="row-actions">
+      ${u.url ? `<a class="btn" href="${esc(u.url)}" target="_blank" rel="noopener">Release on GitHub</a>` : ""}
+      ${u.enabled ? `<button class="btn" id="check-now">Check now</button>` : ""}
+      ${u.newer ? (lsGet("skip-update") === u.latest ? `<button class="btn" id="unskip">Show the reminder again</button>` : `<button class="btn" id="skip-upd">Skip this version</button>`) : ""}
+    </div>`;
+  $("#copy-cmd")?.addEventListener("click", async (e) => {
+    try { await navigator.clipboard.writeText(cmd); e.target.textContent = "Copied"; } catch { toast("Select the command and copy it"); }
+  });
+  $("#check-now")?.addEventListener("click", (e) => { e.target.disabled = true; e.target.textContent = "Checking…"; loadAbout(true); });
+  $("#skip-upd")?.addEventListener("click", () => { lsSet("skip-update", u.latest); renderStrip(); loadAbout(); toast(`Hidden until the next release after v${u.latest}`); });
+  $("#unskip")?.addEventListener("click", () => { lsSet("skip-update", null); renderStrip(); loadAbout(); });
 }
 
 // ---------- Signal: overview ----------

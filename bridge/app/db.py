@@ -3,6 +3,7 @@
 Keep it on local disk, not a network share: SQLite over CIFS/NFS is asking for
 corruption.
 """
+from .geo import clean
 import json
 import sqlite3
 import threading
@@ -353,7 +354,7 @@ class DB:
         return rows[0]["pubkey"] if rows else None
 
     def heard(self, since_ms: int) -> list[dict]:
-        return self._rows("SELECT * FROM heard WHERE last_ts>=? ORDER BY last_ts DESC", (since_ms,))
+        return [clean(r) for r in self._rows("SELECT * FROM heard WHERE last_ts>=? ORDER BY last_ts DESC", (since_ms,))]
 
     # RF + samples
     def add_packet(self, p: dict) -> int:

@@ -43,6 +43,7 @@
 <main>
   <!-- Chats -->
   <section id="v-chats" class="view">
+    <div id="setup" class="setup" hidden></div>
     <div class="toolbar">
       <input id="search" class="search" type="search" placeholder="Search messages" autocomplete="off" aria-label="Search messages">
       <button id="add-chan" type="button" class="btn" aria-expanded="false">+ Channel</button>
@@ -252,7 +253,8 @@
         <a href="#/radio/batteries"><span><b>Repeater batteries</b><small>Watched repeaters, checked every 3 hours</small></span><span class="mv" data-mv="batteries"></span></a>
         <a href="#/radio/filters"><span><b>Spam filters</b><small>Hide senders, text and bot floods</small></span><span class="mv" data-mv="filters"></span></a>
         <a href="#/radio/appearance"><span><b>Appearance</b><small>Colour theme, light or dark</small></span><span class="mv" data-mv="appearance"></span></a>
-        <a href="#/radio/maintenance"><span><b>Maintenance</b><small>Adverts and reboot</small></span><span class="mv" data-mv="maintenance"></span></a>
+        <a href="#/radio/maintenance"><span><b>Maintenance</b><small>Adverts, reboot, export your messages</small></span><span class="mv" data-mv="maintenance"></span></a>
+        <a href="#/radio/about"><span><b>About and updates</b><small>Version, new releases, how to update</small></span><span class="mv" data-mv="about"></span></a>
       </nav>
     </div>
     <div class="subpage" data-sub="battery" data-title="Battery" hidden>
@@ -349,11 +351,18 @@
     <h2 class="sub">Colour theme</h2>
     <div class="palettes" id="palettes"></div>
     </div>
+    <div class="subpage" data-sub="about" data-title="About and updates" hidden><div id="about"></div></div>
     <div class="subpage" data-sub="maintenance" data-title="Maintenance" hidden>
     <div class="row-actions">
       <button id="advert" class="btn">Advert (zero-hop)</button>
       <button id="advert-flood" class="btn">Advert (flood)</button>
       <button id="reboot" class="btn danger">Reboot radio</button>
+    </div>
+    <h2 class="sub">Export messages <small>everything the bridge has stored</small></h2>
+    <p class="hint">A copy of all your chats and channels: time, who, text, delivery and signal. CSV opens in a spreadsheet; JSON is for scripts.</p>
+    <div class="row-actions">
+      <a class="btn" href="/api/export?format=csv" download>Download CSV</a>
+      <a class="btn" href="/api/export?format=json" download>Download JSON</a>
     </div>
     </div>
   </section>

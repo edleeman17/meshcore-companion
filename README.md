@@ -298,6 +298,8 @@ cd meshcore-companion && git pull && ./install.sh
 ```
 It keeps your radio, pairing and settings. The radio link drops for about 30 seconds while the bridge restarts. Then close and reopen the app on your phone.
 
+**Knowing when to update:** the bridge checks GitHub for a newer release every 12 hours. When one is out, an **UPDATE** pill appears at the front of the status strip; **Radio → About and updates** shows what's new and the exact command for your install (install.sh or Docker). The check is one anonymous request to GitHub's public releases API, with no IDs or stats. Set `UPDATE_CHECK=0` to turn it off.
+
 <details><summary>Advanced: install from another computer instead (<code>deploy.sh</code>)</summary>
 
 If you keep the repo on a workstation and push to the Pi over SSH (handy when developing):
@@ -348,6 +350,15 @@ Bridge environment (`~/.config/meshcore-bridge.env`, see `bridge/meshcore-bridge
 | `DISCOVER_NAMES` | Extra `#hashtag` names (your towns and topics) to test for channel discovery. |
 | `BACKUP_DIR` | Nightly backup destination. Default `~/meshcore-backups`, 14 days kept. |
 | `QRZ_USERNAME` / `QRZ_PASSWORD` | Optional QRZ.com login for callsign profiles. A free account gives name, town and country; a QRZ XML subscription adds photo and grid. Lookups are cached for 30 days. |
+| `MAP_TILES` | Base map. Empty (default) = [OpenFreeMap](https://openfreemap.org) vector tiles: worldwide, free, no key. Or a TileJSON URL, or a `.pmtiles` file in the OpenMapTiles schema for an **offline map** of your area (see below). The map is drawn in the app's own colours and follows every palette and dark mode. |
+| `MAP_GLYPHS` | Label fonts for a fully offline map, e.g. `https://your-host/fonts/{fontstack}/{range}.pbf`. Default: OpenFreeMap's. |
+| `UPDATE_CHECK` | `0` turns off the 12-hourly check for new releases. Default on. |
+
+**Offline map for your area.** Build a `.pmtiles` file with [Planetiler](https://github.com/onthegomap/planetiler) from a [Geofabrik](https://download.geofabrik.de) extract, put it where your web server can serve it (byte-range requests must work, which nginx and Caddy do by default), and set `MAP_TILES` to its URL:
+```sh
+java -jar planetiler.jar --download --area=monaco --output=myarea.pmtiles   # any Geofabrik region name
+```
+Without WebGL, the map falls back to OpenStreetMap's raster tiles in greyscale.
 
 ## Troubleshooting
 
@@ -366,6 +377,14 @@ Bridge environment (`~/.config/meshcore-bridge.env`, see `bridge/meshcore-bridge
 
 Logs are in `~/.local/share/meshcore-bridge/bridge.log` on the bridge host.
 
+## Tests
+
+```sh
+pip install pytest cryptography
+cd bridge && python -m pytest -q tests
+```
+They cover the parts that break quietly: spam filters, signed messages, the packet decoder, position cleaning and the update check. They run on every pull request.
+
 ## API
 
 Everything the UI does is available over HTTP:
@@ -376,7 +395,7 @@ Everything the UI does is available over HTTP:
 
 ## Privacy
 
-Everything stays on your own machines. The bridge stores messages, packet metadata and stats in a local SQLite file. There's no telemetry and no third-party service, apart from map tiles (OpenStreetMap) and your browser's own push service. Channel discovery only ever identifies `#hashtag` channels, whose names *are* their keys. Private channels can't be guessed.
+Everything stays on your own machines. The bridge stores messages, packet metadata and stats in a local SQLite file. There's no telemetry and no third-party service, apart from the release check (GitHub, see [Updating](#updating)), map tiles (OpenFreeMap, or your own `MAP_TILES`; OpenStreetMap raster as a fallback) and your browser's own push service. Channel discovery only ever identifies `#hashtag` channels, whose names *are* their keys. Private channels can't be guessed.
 
 ## Credits
 
