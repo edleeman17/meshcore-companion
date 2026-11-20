@@ -5,7 +5,11 @@ for (const ev of ["gesturestart", "gesturechange"]) document.addEventListener(ev
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const api = async (path, opts = {}) => {
   const r = await fetch("/api" + path, { headers: { "Content-Type": "application/json" }, ...opts });
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    if (r.status === 401 && j.auth) showGate();      // signed out or revoked: back to the sign-in screen
+    throw new Error(j.detail || r.statusText);
+  }
   return r.json();
 };
 // Over-the-air round-trips to a node (login, status, telemetry, trace, path
@@ -266,7 +270,7 @@ function go(still = false) {
   else if (tab === "contacts") { if (!split) { $("#v-contacts").hidden = false; $("#title").textContent = "Contacts"; loadContacts(); } }
   else if (tab === "map") { $("#v-map").hidden = false; $("#title").textContent = "Map"; showMap(); }
   else if (tab === "signal") { showSub("signal", parts[1]); loadStats(); if (parts[1] === "packets") loadPackets(); }
-  else if (tab === "radio") { showSub("radio", parts[1]); renderRadio(); fillSettings(); fillFilters(); loadStats(); renderBatteryList(); if (parts[1] === "about") loadAbout(); }
+  else if (tab === "radio") { showSub("radio", parts[1]); renderRadio(); fillSettings(); fillFilters(); loadStats(); renderBatteryList(); if (parts[1] === "about") loadAbout(); if (parts[1] === "signing") loadSigning(); if (parts[1] === "account") loadAccount(); }
   else if (!split) { $("#v-chats").hidden = false; $("#title").textContent = "MeshCore"; loadConvs(); }
   syncMuteBtn(); showTicker();
   animateNav(from, parts, before);
@@ -652,6 +656,8 @@ function signedChip(m) {
     if (m.key_state === "mine") return ` <span class="verified" title="Signed with your radio's key">🔏</span>`;
     if (m.key_state === "match") return ` <span class="verified" title="Signed — key matches the one you pinned for ${esc(m.signed_name || m.sender)}">✓🔏</span>`;
     if (m.key_state === "changed") return ` <span class="chip q-bad" title="Valid signature, but a DIFFERENT key than you pinned for ${esc(m.sender)} — possible impersonator">⚠ key changed</span>`;
+    if (m.key_state === "revoked") return ` <span class="chip q-bad" title="Signed with a key its owner has revoked — don't trust it">⚠ revoked key</span>`;
+    if (m.key_state === "radio_only") return ` <span class="chip q-bad" title="${esc(m.sender)} has a protected signing key, but this was signed by their radio alone. Anyone with access to the radio can do that.">⚠ radio-only signature</span>`;
     return ` <span class="chip" title="Signed and valid, but you haven't pinned a key for ${esc(m.sender)} yet — open to verify">🔏 signed</span>`;
   }
   if (m.signed_ok === 0) return ` <span class="chip q-bad" title="Carries a signature that does NOT check out — ignore it">🔏✗</span>`;
@@ -839,9 +845,11 @@ function msgDetails(m) {
     Signed: m.key_state === "unsigned_usual" ? `⚠ no signature, though ${m.sender} usually signs and you pinned their key — it may be someone else using their name`
       : !m.signed ? null
       : m.signed_ok === 0 ? `🔏✗ carries a signature that does not check out — ignore it`
-      : m.key_state === "mine" ? `🔏 signed with your radio's key`
+      : m.key_state === "mine" ? `🔏 signed with your key`
       : m.key_state === "match" ? `✓🔏 valid — key matches the one you pinned for ${m.sender}`
       : m.key_state === "changed" ? `⚠ valid signature, but a DIFFERENT key than you pinned for ${m.sender} — possible impersonator`
+      : m.key_state === "revoked" ? `⚠ signed with a key its owner revoked — don't trust it`
+      : m.key_state === "radio_only" ? `⚠ signed by ${m.sender}'s radio alone, not their protected key. Anyone with access to the radio can do that.`
       : m.key_state === "unpinned" ? `🔏 valid signature by key ${m.signed} — not pinned to ${m.sender} yet`
       : `🔏 by ${m.signed_name || "key " + m.signed}`,
     Verified: m.verified ? "✓ route matches the sender you confirmed" : null,
@@ -1259,7 +1267,12 @@ $("#composer").onsubmit = async (e) => {
   clearReply();
   text.value = ""; text.dispatchEvent(new Event("input"));
   requestAnimationFrame(() => (scroller().scrollTop = 1e9));
-  try { await api("/send", { method: "POST", body: JSON.stringify({ kind, to: peer, text: body, sign }) }); }
+  try {
+    // v2: with a protected key, unlock it (passkey or passphrase) and sign here
+    const sig = sign ? await signV2(peer, body) : null;
+    if (sign && sig === false) throw new Error("not signed");
+    await api("/send", { method: "POST", body: JSON.stringify({ kind, to: peer, text: body, sign: sign && !sig, sig }) });
+  }
   catch (err) { fail(err, "Not sent"); text.value = body; text.dispatchEvent(new Event("input")); }
 };
 
@@ -1288,6 +1301,7 @@ function connectStream() {
   on("pending", () => { refreshState().catch(() => {}); loadContactsSoon(); });
   on("cli", (e) => { const d = JSON.parse(e.data); if (S.route[0] === "contact" && S.route[1].startsWith(d.prefix)) logConsole("← " + d.text); });
   es.onerror = () => {
+    api("/auth/me").then((me) => { if (me.auth && !me.signed_in) showGate(); }, () => {});
     $("#conn").textContent = "Offline"; $("#conn").className = "pill down";
     $("#offline").hidden = false; $("#offline").textContent = "Can't reach the bridge — reconnecting…";
   };
@@ -1430,10 +1444,12 @@ function renderSetup() {
   if (done === items.length) { el.hidden = true; lsSet("setup-hidden", "1"); return; }
   el.hidden = false;
   el.innerHTML = `<div class="setup-head"><b>Getting set up</b><span class="muted">${done} of ${items.length} done</span>
+      <button class="btn sm" id="setup-tour" type="button">Guided setup</button>
       <button class="btn sm" id="setup-hide" type="button">Hide</button></div>
     <ol>${items.map(([ok, t, note, href]) => `<li class="${ok ? "ok" : ""}"><span class="tick">${ok ? "✓" : ""}</span>
       <span>${!ok && href ? `<a href="${href}">${t}</a>` : t}<small>${note}</small></span></li>`).join("")}</ol>`;
   $("#setup-hide").onclick = () => { lsSet("setup-hidden", "1"); el.hidden = true; };
+  $("#setup-tour").onclick = () => runTour();
 }
 
 function renderConn() {
@@ -3578,9 +3594,457 @@ document.addEventListener("keydown", (e) => {
 // ---------- boot ----------
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => { /* offline cache is optional */ });
 (async () => {
+  await authGate();
   try { await refreshState(); S.contacts = await api("/contacts"); } catch { /* bridge down: still render */ }
   connectStream();
   go();
   syncPush();
+  if (!lsGet("tour-v1") && !/^#\/enroll\//.test(location.hash)) setTimeout(() => runTour(), 800);
   api("/packets?limit=1").then((r) => { if (r[0] && !S.tick) setTicker(r[0]); }, () => {});
 })();
+
+// ---------- protected signing key (signing.js, SIGNING.md "Version 2") ----------
+// The key only exists decrypted in this page, for one signature, after a passkey
+// or passphrase unlock. The bridge stores the encrypted key file and nothing else.
+const SG = window.MCSign;
+
+// Ask which secret unlocks the key file. Resolves { slot, secret } or null.
+function unlockPrompt(kf, title = "Unlock your signing key") {
+  return new Promise((resolve) => {
+    const pk = kf.slots.filter((s) => s.type === "passkey" && s.rp_id === location.hostname);
+    const pp = kf.slots.find((s) => s.type === "passphrase");
+    const rc = kf.slots.find((s) => s.type === "recovery");
+    showSheet(`<h3 id="sheet-title" tabindex="-1" autofocus>${esc(title)}</h3>
+      ${pk.length ? `<div class="actions"><button type="button" class="btn primary" id="ul-pk">Use passkey</button></div>` : ""}
+      ${pp ? `<form id="ul-pp"><label>Passphrase <input name="pw" type="password" autocomplete="current-password" required></label>
+        <button class="btn${pk.length ? "" : " primary"}">Unlock</button></form>` : ""}
+      ${rc ? `<details><summary>Use the recovery code</summary><form id="ul-rc"><label>Recovery code
+        <input name="code" autocapitalize="characters" spellcheck="false" required></label><button class="btn">Unlock</button></form></details>` : ""}
+      <div class="actions"><button type="button" class="btn" id="ul-no">Cancel</button></div>`, { noClose: true });
+    let settled = false;
+    const done = (v) => { if (settled) return; settled = true; $("#sheet").close(); resolve(v); };
+    $("#ul-no").onclick = () => done(null);
+    $("#sheet").addEventListener("cancel", () => done(null), { once: true });
+    if (pk.length) $("#ul-pk").onclick = async () => {
+      for (const slot of pk) {
+        try { return done({ slot, secret: { prf: await SG.passkeyPrf(slot.cred_id, SG.unb64u(slot.prf_salt)) } }); }
+        catch (e) { if (slot === pk[pk.length - 1]) toast(e.message || "Passkey cancelled", "err"); }
+      }
+    };
+    if (pp) $("#ul-pp").onsubmit = (e) => { e.preventDefault(); done({ slot: pp, secret: { passphrase: e.target.pw.value } }); };
+    if (rc) $("#ul-rc").onsubmit = (e) => {
+      e.preventDefault();
+      try { done({ slot: rc, secret: { recovery: SG.recoveryFromText(e.target.code.value) } }); }
+      catch (err) { fail(err); }
+    };
+  });
+}
+
+async function unlockSeed(kf, title) {
+  const u = await unlockPrompt(kf, title);
+  if (!u) return null;
+  return SG.unwrapSlot(kf, u.slot, await SG.slotIkm(u.slot, u.secret));
+}
+
+// Sign a channel post. null = no protected key (bridge signs with the radio, if
+// allowed); false = the user cancelled; else { ts, keyid, sig } for /api/send.
+async function signV2(chanIdx, body) {
+  const st = await api("/signing");
+  if (!st.keyfile) return null;
+  const u = await unlockPrompt(st.keyfile, "Sign this post");
+  if (!u) return false;
+  const ts = Math.floor(Date.now() / 1000);
+  const msg = await SG.canonicalV2(body, st.channels[chanIdx] ?? "", ts, st.radio_pub);
+  const sig = await SG.unlockAndSign(st.keyfile, u.slot, u.secret, msg);
+  return { ts, keyid: st.keyfile.pub.slice(0, 16), sig: SG.b2hex(sig) };
+}
+
+async function putKeyfile(kf, oldSeed = null) {
+  let proof = null;
+  if (oldSeed) {
+    const ts = Math.floor(Date.now() / 1000);
+    proof = { ts, sig: SG.b2hex(await SG.signWith(oldSeed, SG.updateInput(SG.hex2b(kf.pub), ts))) };
+  }
+  return api("/signing/keyfile", { method: "PUT", body: JSON.stringify({ keyfile: kf, proof }) });
+}
+
+const fingerprint = (pub) => pub.slice(0, 16).match(/..../g).join(" ");
+
+async function loadSigning() {
+  const box = $("#signing");
+  let st;
+  try { st = await api("/signing"); } catch (e) { box.innerHTML = `<p class="hint">${esc(e.message)}</p>`; return; }
+  const kf = st.keyfile;
+  const label = { passkey: "Passkey", passphrase: "Passphrase", recovery: "Recovery code" };
+  box.innerHTML = kf ? `
+    <p>Signed posts use a key that only unlocks with your passkey or passphrase. Your radio alone can't sign as you.</p>
+    <p><b>Key</b> <code>${fingerprint(kf.pub)}</code><br><small class="hint">Read this out when someone pins your key in person.</small></p>
+    <h2 class="sub">Unlocks with</h2>
+    <ul class="plain">${kf.slots.map((s) => `<li>${label[s.type]}${s.rp_id && s.rp_id !== location.hostname ? ` <small>(${esc(s.rp_id)})</small>` : ""}</li>`).join("")}</ul>
+    <div class="row-actions">
+      <button class="btn" id="sg-add-pk">Add a passkey</button>
+      <button class="btn" id="sg-add-pp">${kf.slots.some((s) => s.type === "passphrase") ? "Change passphrase" : "Add a passphrase"}</button>
+      <button class="btn" id="sg-dl">Download key file</button>
+      <button class="btn danger" id="sg-revoke">Revoke this key</button>
+    </div>
+    <small class="hint">The key file is encrypted. meshcore-tui and other apps can use it with your passphrase or a YubiKey passkey.</small>`
+  : `<p>Right now your radio signs your posts with its own key. Anyone who can reach the radio, or has it, can sign as you.</p>
+    <p>Set up a protected key: it only unlocks with a passkey (Face ID, Bitwarden, YubiKey) or a long passphrase, every time you sign.</p>
+    <div class="row-actions"><button class="btn primary" id="sg-setup">Set up signing key</button></div>`;
+  if (!kf) { $("#sg-setup").onclick = setupSigning; return; }
+  $("#sg-add-pk").onclick = () => editSlots(kf, "passkey");
+  $("#sg-add-pp").onclick = () => editSlots(kf, "passphrase");
+  $("#sg-dl").onclick = () => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(kf, null, 2)], { type: "application/json" }));
+    a.download = "meshcore-signing-key.json"; a.click();
+  };
+  $("#sg-revoke").onclick = async () => {
+    if (!await confirmSheet("Revoke this signing key?", "Tells everyone listening that this key is no longer yours. Use it if your passphrase or key file leaked. You'll need to set up a new key, and people who pinned you will need to pin the new one.", "Revoke", true)) return;
+    try {
+      const seed = await unlockSeed(kf, "Unlock to revoke"); if (!seed) return;
+      const pkt = await SG.revocationPacket(seed, SG.hex2b(kf.pub), Math.floor(Date.now() / 1000)); seed.fill(0);
+      await api("/signing/revoke", { method: "POST", body: JSON.stringify({ packet: SG.b2hex(pkt) }) });
+      toast("Key revoked and announced on every channel"); loadSigning();
+    } catch (e) { fail(e, "Not revoked"); }
+  };
+}
+
+function askPassphrase(title) {
+  return new Promise((resolve) => {
+    showSheet(`<h3 id="sheet-title" tabindex="-1" autofocus>${esc(title)}</h3>
+      <p>At least 4 random words. A short PIN isn't allowed: someone with a copy of the key file could guess it in minutes.</p>
+      <form id="pp-f"><label>Passphrase <input name="a" type="password" autocomplete="new-password" required></label>
+      <label>Again <input name="b" type="password" autocomplete="new-password" required></label>
+      <p class="hint" id="pp-why"></p><button class="btn primary">Save</button></form>
+      <div class="actions"><button type="button" class="btn" id="pp-no">Cancel</button></div>`, { noClose: true });
+    const f = $("#pp-f");
+    f.a.oninput = () => ($("#pp-why").textContent = SG.passphraseProblem(f.a.value) || "Strong enough");
+    $("#pp-no").onclick = () => { $("#sheet").close(); resolve(null); };
+    f.onsubmit = (e) => {
+      e.preventDefault();
+      const why = SG.passphraseProblem(f.a.value);
+      if (why) return ($("#pp-why").textContent = why);
+      if (f.a.value !== f.b.value) return ($("#pp-why").textContent = "The two don't match");
+      $("#sheet").close(); resolve(f.a.value);
+    };
+  });
+}
+
+async function setupSigning() {
+  try {
+    const { seed, pub, kf, recoveryText } = await SG.newKeyfile();
+    const saved = await new Promise((resolve) => {
+      showSheet(`<h3 id="sheet-title" tabindex="-1" autofocus>Your recovery code</h3>
+        <p>Save this in Bitwarden (or print it). It unlocks your key if you lose your passkey and passphrase. It's shown only once.</p>
+        <p><code class="big">${esc(recoveryText)}</code></p>
+        <label class="check"><input type="checkbox" id="rc-ok"> I've saved it somewhere safe</label>
+        <div class="actions"><button type="button" class="btn primary" id="rc-next" disabled>Next</button><button type="button" class="btn" id="rc-no">Cancel</button></div>`, { noClose: true });
+      $("#rc-ok").onchange = (e) => ($("#rc-next").disabled = !e.target.checked);
+      $("#rc-next").onclick = () => { $("#sheet").close(); resolve(true); };
+      $("#rc-no").onclick = () => { $("#sheet").close(); resolve(false); };
+    });
+    if (!saved) { seed.fill(0); return false; }
+    try { kf.slots.push(await SG.addPasskeySlot(seed, pub, `${S.state?.name || "MeshCore"} signing`)); }
+    catch (e) { toast(`No passkey added: ${e.message}`, "err"); }
+    if (!kf.slots.some((s) => s.type === "passkey") || await confirmSheet("Also add a passphrase?", "Needed for meshcore-tui and other apps without passkeys, and as a backup.", "Add passphrase")) {
+      const pw = await askPassphrase("Choose a passphrase");
+      if (pw) kf.slots.push(await SG.addPassphraseSlot(seed, pub, pw));
+    }
+    seed.fill(0);
+    if (!kf.slots.some((s) => s.type !== "recovery")) { toast("Set-up cancelled: add a passkey or a passphrase", "err"); return false; }
+    await putKeyfile(kf);
+    toast("Signing key set up: your radio has vouched for it");
+    loadSigning();
+    return true;
+  } catch (e) { fail(e, "Set-up failed"); return false; }
+}
+
+async function editSlots(kf, type) {
+  try {
+    const seed = await unlockSeed(kf, "Unlock to change how it unlocks"); if (!seed) return;
+    const pub = SG.hex2b(kf.pub);
+    const next = { ...kf, slots: [...kf.slots] };
+    if (type === "passkey") next.slots.push(await SG.addPasskeySlot(seed, pub, `${S.state?.name || "MeshCore"} signing`));
+    else {
+      const pw = await askPassphrase("New passphrase"); if (!pw) return seed.fill(0);
+      next.slots = next.slots.filter((s) => s.type !== "passphrase");
+      next.slots.push(await SG.addPassphraseSlot(seed, pub, pw));
+    }
+    await putKeyfile(next, seed); seed.fill(0);
+    toast("Saved"); loadSigning();
+  } catch (e) { fail(e, "Not saved"); }
+}
+
+// ---------- updates on iPhone ----------
+// A home-screen web app on iOS keeps the old page alive for days: switching back
+// to it doesn't reload, so a deploy never shows. Each time the app comes back to
+// the front (and every 30 min) ask the server whether app.js has changed, and
+// offer a reload. "Reload app" in Maintenance does the same by hand.
+const shellTag = async () => {
+  const r = await fetch("app.js", { method: "HEAD", cache: "no-store" });
+  return r.headers.get("etag") || r.headers.get("last-modified") || "";
+};
+let loadedTag = null, lastTagCheck = 0;
+async function checkForNewVersion() {
+  if (Date.now() - lastTagCheck < 60_000) return;
+  lastTagCheck = Date.now();
+  try {
+    const tag = await shellTag();
+    if (!tag) return;
+    if (loadedTag === null) loadedTag = tag;
+    else if (tag !== loadedTag) $("#new-version").hidden = false;
+  } catch { /* offline: try next time */ }
+}
+async function reloadApp() {
+  try {
+    const keys = await caches.keys();
+    await Promise.all(keys.filter((k) => k.startsWith("mesh-v")).map((k) => caches.delete(k)));   // keep map tiles
+    const reg = await navigator.serviceWorker?.getRegistration();
+    await reg?.update();
+  } catch { /* reload anyway */ }
+  location.reload();
+}
+$("#new-version").onclick = reloadApp;
+$("#reload-app").onclick = reloadApp;
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") checkForNewVersion(); });
+setInterval(checkForNewVersion, 30 * 60_000);
+checkForNewVersion();
+
+// ---------- passkey login (bridge app/auth.py) ----------
+// With AUTH=on the app needs a passkey sign-in once per device; the cookie then lasts 180
+// days, renewed as you use it. Push notifications don't depend on being signed
+// in. #/enroll/<code> is the one-time link from `python -m app.auth enroll` or
+// from "Add a device".
+const WA = {
+  creation(o) {
+    if (PublicKeyCredential.parseCreationOptionsFromJSON) return PublicKeyCredential.parseCreationOptionsFromJSON(o);
+    return { ...o, challenge: SG.unb64u(o.challenge), user: { ...o.user, id: SG.unb64u(o.user.id) },
+      excludeCredentials: (o.excludeCredentials || []).map((c) => ({ ...c, id: SG.unb64u(c.id) })) };
+  },
+  request(o) {
+    if (PublicKeyCredential.parseRequestOptionsFromJSON) return PublicKeyCredential.parseRequestOptionsFromJSON(o);
+    return { ...o, challenge: SG.unb64u(o.challenge), allowCredentials: (o.allowCredentials || []).map((c) => ({ ...c, id: SG.unb64u(c.id) })) };
+  },
+  json(c) {
+    if (c.toJSON) return c.toJSON();
+    const r = c.response, b = (x) => (x ? SG.b64u(x) : undefined);
+    return { id: c.id, rawId: b(c.rawId), type: c.type, clientExtensionResults: {},
+      authenticatorAttachment: c.authenticatorAttachment || undefined,
+      response: r.attestationObject
+        ? { clientDataJSON: b(r.clientDataJSON), attestationObject: b(r.attestationObject), transports: r.getTransports?.() || [] }
+        : { clientDataJSON: b(r.clientDataJSON), authenticatorData: b(r.authenticatorData), signature: b(r.signature), userHandle: b(r.userHandle) } };
+  },
+};
+
+const deviceName = () => /iPhone/.test(navigator.userAgent) ? "iPhone" : /iPad/.test(navigator.userAgent) ? "iPad"
+  : /Mac/.test(navigator.userAgent) ? "Mac" : /Android/.test(navigator.userAgent) ? "Android" : "Passkey";
+
+async function registerPasskey(code) {
+  const b = await api("/auth/register/begin", { method: "POST", body: JSON.stringify({ code }) });
+  const cred = await navigator.credentials.create({ publicKey: WA.creation(b.options) });
+  return api("/auth/register/finish", { method: "POST",
+    body: JSON.stringify({ cid: b.cid, credential: WA.json(cred), name: `${deviceName()} · ${new Date().toLocaleDateString()}` }) });
+}
+
+async function signInPasskey() {
+  const b = await api("/auth/login/begin", { method: "POST" });
+  const cred = await navigator.credentials.get({ publicKey: WA.request(b.options) });
+  return api("/auth/login/finish", { method: "POST", body: JSON.stringify({ cid: b.cid, credential: WA.json(cred) }) });
+}
+
+let gateWaiters = null;
+function showGate() {
+  const g = $("#gate");
+  if (!g.hidden) return gateWaiters?.promise;
+  const enroll = (location.hash.match(/^#\/enroll\/([\w-]+)/) || [])[1];
+  g.hidden = false;
+  document.body.classList.add("gated");
+  g.innerHTML = enroll ? `
+    <div class="gate-card"><h1>Add this device</h1>
+      <p>Save a passkey for ${esc(location.hostname)}. Face ID, Touch ID, Bitwarden or a YubiKey all work.</p>
+      <button class="btn primary" id="gate-go">Create passkey</button><p class="hint" id="gate-msg"></p></div>` : `
+    <div class="gate-card"><h1>MeshCore Companion</h1>
+      <p>Sign in with your passkey.</p>
+      <button class="btn primary" id="gate-go">Sign in with passkey</button><p class="hint" id="gate-msg"></p>
+      <details><summary>No passkey on this device?</summary><p class="hint">On a device that's signed in, open
+      Radio → Devices and sign-in → Add a device, and scan the code. Or on the bridge host run
+      <code>venv/bin/python -m app.auth enroll</code>.</p></details></div>`;
+  let resolve; const promise = new Promise((r) => (resolve = r));
+  gateWaiters = { promise };
+  $("#gate-go").onclick = async () => {
+    $("#gate-msg").textContent = "";
+    try {
+      if (enroll) await registerPasskey(enroll); else await signInPasskey();
+      if (enroll) history.replaceState(null, "", location.pathname + "#/chats");
+      if (gateWaiters?.booted) return location.reload();   // signed out mid-session: start clean
+      g.hidden = true; document.body.classList.remove("gated"); resolve();
+    } catch (e) { $("#gate-msg").textContent = e.name === "NotAllowedError" ? "Cancelled" : (e.message || String(e)); }
+  };
+  return promise;
+}
+
+async function authGate() {
+  let me;
+  try { me = await api("/auth/me"); } catch { return; }      // bridge down: the offline banner covers it
+  const enrolling = /^#\/enroll\//.test(location.hash);
+  if ((me.auth && !me.signed_in) || enrolling) await showGate();   // enrol works before login is switched on
+  if (gateWaiters) gateWaiters.booted = true; else gateWaiters = { booted: true };
+}
+
+const agoS = (s) => { const d = Date.now() / 1000 - s; return d < 3600 ? "just now" : d < 86400 ? `${Math.round(d / 3600)} h ago` : `${Math.round(d / 86400)} days ago`; };
+const uaName = (ua) => /iPhone/.test(ua) ? "iPhone" : /iPad/.test(ua) ? "iPad" : /Macintosh/.test(ua) ? "Mac"
+  : /Android/.test(ua) ? "Android" : /Windows/.test(ua) ? "Windows" : /Linux/.test(ua) ? "Linux" : "Browser";
+
+async function loadAccount() {
+  const box = $("#account");
+  let a;
+  try { a = await api("/account"); } catch (e) { box.innerHTML = `<p class="hint">${esc(e.message)}</p>`; return; }
+  box.innerHTML = `
+    <h2 class="sub">Signed-in devices</h2>
+    <ul class="plain">${a.sessions.map((s) => `<li><b>${uaName(s.ua)}</b>${s.id === a.me ? " (this one)" : ""}
+      <small> · ${agoS(s.last_seen)}${s.push ? " · notifications on" : ""}</small>
+      <button class="btn small" data-end="${s.id}">Sign out</button></li>`).join("")}</ul>
+    <div class="row-actions"><button class="btn" id="ac-link">Add a device</button></div>
+    <h2 class="sub">Passkeys</h2>
+    <ul class="plain">${a.passkeys.map((p) => `<li><b>${esc(p.name || "Passkey")}</b>
+      <small> · ${p.last_used ? "used " + agoS(p.last_used) : "not used yet"}</small>
+      <button class="btn small" data-ren="${esc(p.cred_id)}">Rename</button>
+      ${a.passkeys.length > 1 ? `<button class="btn small danger" data-del="${esc(p.cred_id)}">Remove</button>` : ""}</li>`).join("")}</ul>
+    <div class="row-actions"><button class="btn" id="ac-addpk">Add a passkey here</button></div>
+    <h2 class="sub">App tokens <small>for dashboards and sync tools</small></h2>
+    <ul class="plain">${a.tokens.map((t) => `<li><b>${esc(t.name)}</b> <small>${t.scope} · ${t.last_used ? "used " + agoS(t.last_used) : "not used yet"}</small>
+      <button class="btn small danger" data-tok="${t.id}">Revoke</button></li>`).join("") || "<li class='hint'>None</li>"}</ul>
+    <form id="ac-newtok" class="row-actions"><input name="name" placeholder="Name, e.g. dash" required>
+      <select name="scope"><option value="read">read-only</option><option value="sync">sync</option></select>
+      <button class="btn">Create token</button></form>
+    <h2 class="sub">Notifications</h2>
+    <label class="check"><input type="checkbox" id="ac-hide" ${a.hide_push_text ? "checked" : ""}> Hide message text on the lock screen (shows only who)</label>`;
+  box.onclick = async (e) => {
+    const t = e.target.closest("button"); if (!t) return;
+    try {
+      if (t.dataset.end) {
+        const mine = t.dataset.end === a.me;
+        if (!await confirmSheet(mine ? "Sign out of this device?" : "Sign that device out?", mine ? "" : "It will need a passkey to get back in, and stops getting notifications.", "Sign out", true)) return;
+        if (mine) { await api("/auth/logout", { method: "POST" }); return location.reload(); }
+        await api(`/account/sessions/${t.dataset.end}`, { method: "DELETE" });
+      } else if (t.dataset.del) {
+        if (!await confirmSheet("Remove this passkey?", "Devices signed in with it are signed out.", "Remove", true)) return;
+        await api(`/account/passkeys/${encodeURIComponent(t.dataset.del)}`, { method: "DELETE" });
+      } else if (t.dataset.ren) {
+        const name = prompt("Name for this passkey"); if (!name) return;
+        await api(`/account/passkeys/${encodeURIComponent(t.dataset.ren)}`, { method: "POST", body: JSON.stringify({ name }) });
+      } else if (t.dataset.tok) {
+        if (!await confirmSheet("Revoke this token?", "Whatever uses it stops working straight away.", "Revoke", true)) return;
+        await api(`/account/tokens/${t.dataset.tok}`, { method: "DELETE" });
+      } else if (t.id === "ac-addpk") { await registerPasskey(null); toast("Passkey added"); }
+      else if (t.id === "ac-link") {
+        const { code, minutes } = await api("/account/device-link", { method: "POST" });
+        const url = `${location.origin}${location.pathname}#/enroll/${code}`;
+        return showQr("Add a device", url, `Scan on the new device. Works once, for ${minutes} minutes.`);
+      } else return;
+      loadAccount();
+    } catch (err) { fail(err); }
+  };
+  $("#ac-hide").onchange = (e) => api("/account/push-privacy", { method: "POST", body: JSON.stringify({ hide: e.target.checked }) }).catch(fail);
+  $("#ac-newtok").onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      const { token } = await api("/account/tokens", { method: "POST", body: JSON.stringify({ name: e.target.name.value, scope: e.target.scope.value }) });
+      showSheet(`<h3 id="sheet-title" tabindex="-1" autofocus>Token created</h3><p>Copy it now; it isn't shown again.</p><p><code class="big">${esc(token)}</code></p>`);
+      loadAccount();
+    } catch (err) { fail(err); }
+  };
+}
+
+// ---------- first-run tour ----------
+// Shown once per device (localStorage "tour-v1"); Radio → Maintenance runs it
+// again. Every step can be skipped; the last page lists what's done.
+const TOUR_CHANNEL = "#meshcore-companion";
+async function runTour() {
+  const done = {};
+  const st = () => S.state || {};
+  const haveChan = () => Object.values(st().channels || {}).some((n) => n.toLowerCase() === TOUR_CHANNEL);
+  const pushOn = () => typeof Notification !== "undefined" && Notification.permission === "granted";
+  let signing = null, me = null;
+  try { [signing, me] = await Promise.all([api("/signing"), api("/auth/me")]); } catch { /* bridge down: steps still show */ }
+
+  const steps = [
+    { title: "Welcome", body: () => `<p>This is your MeshCore radio in a web app: chats, channels, contacts, the map and signal stats.</p>
+        <p>A few quick steps get it set up. Each one takes under a minute and you can skip any of them.</p>`,
+      next: "Start" },
+    { title: "Your radio's name", body: () => `<p>This is the name other people see on your posts and on the map.</p>
+        <label>Name <input id="tour-name" value="${esc(st().name || "")}" maxlength="31" autocomplete="off"></label>`,
+      next: "Save name", run: async () => {
+        const name = $("#tour-name").value.trim();
+        if (name && name !== st().name) { await api("/settings", { method: "POST", body: JSON.stringify({ name }) }); await refreshState(); }
+        done.name = name || st().name; return true;
+      } },
+    { title: "Community channel", body: () => haveChan()
+        ? `<p>You're in <b>${TOUR_CHANNEL}</b>, where people using this app chat, ask for help and test signed posts.</p>`
+        : `<p>Join <b>${TOUR_CHANNEL}</b>, where people using this app chat, ask for help and test signed posts?</p>`,
+      next: () => (haveChan() ? "Next" : "Join"), run: async () => {
+        if (!haveChan()) { await api("/channels", { method: "POST", body: JSON.stringify({ name: TOUR_CHANNEL }) }); await refreshState(); }
+        done.channel = true; return true;
+      } },
+    { title: "Notifications", body: () => pushOn()
+        ? `<p>Notifications are on for this device.</p>`
+        : `<p>Get a notification for direct messages, mentions and the channels you pick, even when the app is closed.</p>
+           ${/iPhone|iPad/.test(navigator.userAgent) && !navigator.standalone ? `<p class="hint">On iPhone, first add the app to your Home Screen (Share → Add to Home Screen) and open it from there.</p>` : ""}`,
+      next: () => (pushOn() ? "Next" : "Turn on"), run: async () => {
+        if (!pushOn()) await $("#notify").onclick();
+        done.push = pushOn(); return true;
+      } },
+    { title: "Signing key", body: () => signing?.keyfile
+        ? `<p>Your signing key is set up. Fingerprint <code>${fingerprint(signing.keyfile.pub)}</code></p>`
+        : `<p>Signed posts let people check a message really came from you, not someone using your name.</p>
+           <p>Your key only unlocks with your passkey (Face ID, Bitwarden, YubiKey) or a long passphrase, each time you sign. Your radio alone can't sign as you.</p>
+           <p class="hint">You'll save a recovery code, then create a passkey. About 2 minutes.</p>`,
+      next: () => (signing?.keyfile ? "Next" : "Set up"), run: async () => {
+        if (signing?.keyfile) { done.signing = true; return true; }
+        const ok = await setupSigning();
+        try { signing = await api("/signing"); } catch { /* keep going */ }
+        done.signing = !!signing?.keyfile; return ok !== false;
+      } },
+    { title: "Sign-in (optional)", body: () => me?.auth
+        ? `<p>Sign-in is on: this app needs your passkey once on each device.</p>`
+        : `<p>Right now anyone on your home network can open this app. That's usually fine at home.</p>
+           <p>If you want a passkey sign-in, run this on the bridge, open the link it prints, then set <code>AUTH=on</code>:</p>
+           <p><code class="big">venv/bin/python -m app.auth enroll</code></p>`,
+      next: "Next", run: async () => { done.login = !!me?.auth; return true; } },
+  ];
+
+  let i = 0;
+  const finish = () => {
+    lsSet("tour-v1", "1");
+    const row = (ok, text) => `<li>${ok ? "✓" : "–"} ${text}</li>`;
+    showSheet(`<h3 id="sheet-title" tabindex="-1" autofocus>All set</h3><ul class="plain">
+      ${row(!!done.name, `Name: ${esc(done.name || st().name || "not set")}`)}
+      ${row(haveChan(), `${TOUR_CHANNEL}`)}
+      ${row(pushOn(), "Notifications")}
+      ${row(!!signing?.keyfile, signing?.keyfile ? `Signing key <code>${fingerprint(signing.keyfile.pub)}</code>` : "Signing key (Radio → Signing key)")}
+      ${row(!!me?.auth, me?.auth ? "Sign-in on" : "Sign-in off (optional)")}</ul>
+      <p class="hint">Run this again any time from Radio → Maintenance.</p>`);
+  };
+  const render = () => {
+    const s = steps[i];
+    const label = typeof s.next === "function" ? s.next() : s.next;
+    showSheet(`<p class="tour-step">Step ${i + 1} of ${steps.length}</p>
+      <div class="tour-dots">${steps.map((_, k) => `<span class="${k < i ? "done" : k === i ? "now" : ""}"></span>`).join("")}</div>
+      <h3 id="sheet-title" tabindex="-1" autofocus>${esc(s.title)}</h3>${s.body()}
+      <div class="actions"><button type="button" class="btn primary" id="tour-next">${esc(label)}</button>
+        ${i > 0 ? `<button type="button" class="btn" id="tour-skip">Skip</button>` : `<button type="button" class="btn" id="tour-skip">Skip the tour</button>`}
+        ${i > 0 ? `<button type="button" class="btn" id="tour-back">Back</button>` : ""}</div>`, { noClose: true });
+    const advance = () => { i++; if (i >= steps.length) finish(); else render(); };
+    $("#tour-next").onclick = async (e) => {
+      e.target.disabled = true;
+      try { if (!s.run || (await s.run()) !== false) return advance(); }
+      catch (err) { fail(err); }
+      render();
+    };
+    $("#tour-skip").onclick = () => { if (i === 0) { lsSet("tour-v1", "1"); $("#sheet").close(); } else advance(); };
+    if (i > 0) $("#tour-back").onclick = () => { i--; render(); };
+  };
+  render();
+}
+$("#run-tour").onclick = () => runTour();

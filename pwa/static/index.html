@@ -26,6 +26,7 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+<div id="gate" class="gate" hidden></div>
 <!-- Radio at a glance: name, link, preset, battery, noise and airtime, always on show -->
 <div id="strip" class="strip" role="status" aria-label="Radio status"><span class="pill" id="conn" title="Radio link">…</span><span class="strip-view"><span id="strip-body"></span></span></div>
 <header class="top">
@@ -251,6 +252,8 @@
         <a href="#/radio/settings"><span><b>Radio settings</b><small>Name, TX power, location, contacts, PIN</small></span><span class="mv" data-mv="settings"></span></a>
         <a href="#/radio/notify"><span><b>Notifications</b><small>Channels, offline and back-in-range alerts</small></span><span class="mv" data-mv="notify"></span></a>
         <a href="#/radio/batteries"><span><b>Repeater batteries</b><small>Watched repeaters, checked every 3 hours</small></span><span class="mv" data-mv="batteries"></span></a>
+        <a href="#/radio/account"><span><b>Devices and sign-in</b><small>Passkeys, signed-in devices, app tokens</small></span><span class="mv" data-mv="account"></span></a>
+        <a href="#/radio/signing"><span><b>Signing key</b><small>Passkey-protected signatures</small></span><span class="mv" data-mv="signing"></span></a>
         <a href="#/radio/filters"><span><b>Spam filters</b><small>Hide senders, text and bot floods</small></span><span class="mv" data-mv="filters"></span></a>
         <a href="#/radio/appearance"><span><b>Appearance</b><small>Colour theme, light or dark</small></span><span class="mv" data-mv="appearance"></span></a>
         <a href="#/radio/maintenance"><span><b>Maintenance</b><small>Adverts, reboot, export your messages</small></span><span class="mv" data-mv="maintenance"></span></a>
@@ -343,6 +346,8 @@
       <button class="btn primary">Save and apply to the last 7 days</button>
     </form>
     </div>
+    <div class="subpage" data-sub="account" data-title="Devices and sign-in" hidden><div id="account"></div></div>
+    <div class="subpage" data-sub="signing" data-title="Signing key" hidden><div id="signing"></div></div>
     <div class="subpage" data-sub="appearance" data-title="Appearance" hidden>
     <h2 class="sub">Mode</h2>
     <div class="seg" id="theme">
@@ -358,6 +363,11 @@
       <button id="advert-flood" class="btn">Advert (flood)</button>
       <button id="reboot" class="btn danger">Reboot radio</button>
     </div>
+    <h2 class="sub">Guided setup</h2>
+    <div class="row-actions"><button id="run-tour" class="btn">Run the setup tour again</button></div>
+    <h2 class="sub">App <small>if it looks out of date</small></h2>
+    <p class="hint">Clears the app's saved files and loads the latest version. Your messages and settings stay.</p>
+    <div class="row-actions"><button id="reload-app" class="btn">Reload app</button></div>
     <h2 class="sub">Export messages <small>everything the bridge has stored</small></h2>
     <p class="hint">A copy of all your chats and channels: time, who, text, delivery and signal. CSV opens in a spreadsheet; JSON is for scripts.</p>
     <div class="row-actions">
@@ -377,6 +387,7 @@
 </dialog>
 <dialog id="sheet" aria-labelledby="sheet-title"><div id="sheet-body"></div><form method="dialog"><button class="btn close">Close</button></form></dialog>
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<button type="button" id="new-version" class="new-version" hidden>New version, tap to reload</button>
 
 <nav class="tabs" aria-label="Main">
   <span class="brand" aria-hidden="true">MeshCore</span>
@@ -390,6 +401,8 @@
 <script src="vendor/uPlot.iife.min.js"></script>
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/chess.min.js"></script>
+<script src="vendor/argon2.umd.min.js"></script>
+<script src="signing.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

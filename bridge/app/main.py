@@ -22,7 +22,7 @@ from .hub import Hub
 from .radio import Radio
 from .qrz import CALL_RE, QRZ
 from .watch import CURVES, OTA_TIMEOUT, Watch, battery_type, cell_pct
-from . import topology
+from . import auth as authmod, signing, topology
 from . import update
 from . import world
 
@@ -82,6 +82,34 @@ async def lifespan(app):
 
 
 app = FastAPI(lifespan=lifespan)
+
+# ---------- passkey login (app/auth.py, docs/adr/0004-passkey-login.md) ----------
+AUTH = authmod.Auth(db.conn)
+RP_NAME = os.environ.get("RP_NAME", "MeshCore Companion")
+
+
+def _origin(request: Request) -> str:
+    return os.environ.get("ORIGIN") or f"https://{request.headers.get('host', 'localhost')}"
+
+
+def _rp_id(request: Request) -> str:
+    from urllib.parse import urlparse
+    return os.environ.get("RP_ID") or urlparse(_origin(request)).hostname
+
+
+@app.middleware("http")
+async def require_login(request: Request, call_next):
+    if not authmod.enabled():
+        request.state.principal = None
+        return await call_next(request)
+    bearer = request.headers.get("authorization", "")
+    bearer = bearer[7:].strip() if bearer.lower().startswith("bearer ") else None
+    status, why, who = AUTH.check(request.method, request.url.path, request.cookies.get(authmod.SESSION_COOKIE),
+                                  bearer, request.headers.get("origin"), _origin(request))
+    if status != 200:
+        return JSONResponse({"detail": why, "auth": True}, status_code=status)
+    request.state.principal = who
+    return await call_next(request)
 
 
 # ---------- health + metrics ----------
@@ -505,6 +533,7 @@ class Send(BaseModel):
     to: str            # dm: full public key (or 12-hex prefix); chan: channel idx
     text: str
     sign: bool = False  # chan only: attach a Companion signature (must fit one packet)
+    sig: dict | None = None  # v2: {ts, keyid, sig} made by the client with the unlocked signing key
 
 
 LIMIT = 140        # max bytes a single MeshCore text message carries
@@ -557,7 +586,7 @@ async def send(body: Send):
     if len(parts) > MAX_PARTS:
         raise HTTPException(400, f"too long: would need {len(parts)} messages "
                                  f"(max {MAX_PARTS}). Trim to ~{MAX_PARTS * LIMIT} bytes.")
-    if body.sign and (body.kind != "chan" or len(parts) > 1):
+    if (body.sign or body.sig) and (body.kind != "chan" or len(parts) > 1):
         raise HTTPException(400, "a signed message must be a single channel post that fits one packet")
     try:
         if body.kind == "dm":
@@ -574,11 +603,85 @@ async def send(body: Send):
             return {**(first or {}), "parts": len(parts)}
         first = None
         for p in parts:
-            m = await radio.send_chan(int(body.to), p, sign=body.sign)
+            m = await radio.send_chan(int(body.to), p, sign=body.sign or bool(body.sig), client_sig=body.sig)
             first = first or m
         return {**(first or {}), "parts": len(parts)}
     except RuntimeError as e:
         raise HTTPException(503, str(e))
+
+
+# ---- v2 protected signing key (SIGNING.md "Version 2") ----
+# The bridge stores only the encrypted key file. Unlocking and signing happen in
+# the client; the seed, passphrase and passkey PRF output never reach here.
+
+class KeyfileIn(BaseModel):
+    keyfile: dict
+    proof: dict | None = None   # {ts, sig}: by the CURRENT key over signing.update_input(new_pub, ts)
+
+
+@app.get("/api/signing")
+def signing_state():
+    own = db.get_setting("own_binding")
+    mine = (radio.mc.self_info or {}).get("public_key") if radio.mc else None
+    return {"keyfile": db.get_setting("signing_keyfile"), "radio_pub": mine,
+            "binding": own["packet"] if own else None,
+            "allow_radio_sign": db.get_setting("allow_radio_sign", False),
+            # exact channel names: the client signs over sha256(name)[0]
+            "channels": {str(k): v for k, v in radio.channels.items()}}
+
+
+@app.put("/api/signing/keyfile")
+async def signing_keyfile(body: KeyfileIn):
+    try:
+        kf = signing.validate_keyfile(body.keyfile)
+    except (ValueError, KeyError, TypeError) as e:
+        raise HTTPException(400, f"bad key file: {e}")
+    cur = db.get_setting("signing_keyfile")
+    if cur:
+        p = body.proof or {}
+        last = db.get_setting("signing_update_ts", 0)
+        try:
+            ts, sig = int(p["ts"]), bytes.fromhex(p["sig"])
+        except (KeyError, ValueError, TypeError):
+            raise HTTPException(403, "replacing the key file needs a proof signed with the current key")
+        if abs(time.time() - ts) > 300 or ts <= last or not signing._ed_verify(
+                cur["pub"], signing.update_input(bytes.fromhex(kf["pub"]), ts), sig):
+            raise HTTPException(403, "proof doesn't verify against the current signing key")
+        db.set_setting("signing_update_ts", ts)
+    rotate = not cur or cur["pub"] != kf["pub"]
+    if rotate:
+        try:
+            await radio.bind_signing_key(bytes.fromhex(kf["pub"]))
+        except RuntimeError as e:
+            raise HTTPException(503, str(e))
+    db.set_setting("signing_keyfile", kf)
+    return {**signing_state(), "rotated": rotate}
+
+
+class PacketIn(BaseModel):
+    packet: str
+
+
+@app.post("/api/signing/revoke")
+async def signing_revoke(body: PacketIn):
+    """Broadcast a revocation (made by the client, signed by the key itself) on
+    every channel, and stop using the key here."""
+    try:
+        raw = bytes.fromhex(body.packet)
+    except ValueError:
+        raise HTTPException(400, "packet must be hex")
+    if not radio._on_revocation(raw):
+        raise HTTPException(400, "not a valid revocation")
+    for idx in list(radio.channels):
+        try:
+            await radio.broadcast_signing_packet(idx, raw)
+        except Exception as e:  # noqa: BLE001
+            log.warning("revocation not sent on channel %s: %s", idx, e)
+    kf = db.get_setting("signing_keyfile")
+    if kf and kf["pub"] == signing.unpack_revoke(raw)[0].hex():
+        db.set_setting("signing_keyfile", None)
+        db.set_setting("own_binding", None)
+    return {"revoked": True}
 
 
 @app.post("/api/contacts/{key}/reset-path")
@@ -1418,6 +1521,9 @@ async def push_subscribe(request: Request):
     if "endpoint" not in sub:
         raise HTTPException(400, "not a PushSubscription")
     db.add_sub(sub)
+    who = getattr(request.state, "principal", None)
+    if who and who.get("kind") == "session":      # revoking this device also stops its pushes
+        AUTH.set_push(who["token_hash"], sub["endpoint"])
     return {"ok": True}
 
 
@@ -1436,6 +1542,205 @@ async def push_test():
     await hub.publish("message", {"direction": "in", "kind": "dm", "peer": "test",
                                   "sender": "MeshCore Companion", "text": "Test notification ✓"}, notify=True)
     return {"subs": len(db.subs())}
+
+
+# ---------- sign-in (open: /api/auth/*) ----------
+import webauthn
+from webauthn.helpers import bytes_to_base64url, base64url_to_bytes
+from webauthn.helpers.structs import (AuthenticatorSelectionCriteria, PublicKeyCredentialDescriptor,
+                                      ResidentKeyRequirement, UserVerificationRequirement)
+
+
+def _session_of(request: Request) -> dict | None:
+    return AUTH.session(request.cookies.get(authmod.SESSION_COOKIE))
+
+
+def _signed_in(request: Request, cred_id: str) -> JSONResponse:
+    tok = AUTH.new_session(cred_id, request.headers.get("user-agent", ""))
+    r = JSONResponse({"ok": True})
+    r.set_cookie(authmod.SESSION_COOKIE, tok, max_age=authmod.SESSION_DAYS * 86400,
+                 httponly=True, secure=True, samesite="strict", path="/")
+    return r
+
+
+@app.get("/api/auth/me")
+def auth_me(request: Request):
+    s = _session_of(request)
+    return {"auth": authmod.enabled(), "signed_in": bool(s) or not authmod.enabled(),
+            "has_passkeys": bool(AUTH.passkeys())}
+
+
+class RegBegin(BaseModel):
+    code: str | None = None
+
+
+@app.post("/api/auth/register/begin")
+def register_begin(body: RegBegin, request: Request):
+    if not _session_of(request) and not AUTH.enroll_code_ok(body.code or ""):
+        raise HTTPException(403, "this link has expired or was already used: make a new one")
+    cid, ch = AUTH.new_challenge("register", code=body.code)
+    opts = webauthn.generate_registration_options(
+        rp_id=_rp_id(request), rp_name=RP_NAME, user_name=RP_NAME, user_id=b"mesh-owner",
+        challenge=ch, timeout=120000,
+        authenticator_selection=AuthenticatorSelectionCriteria(
+            resident_key=ResidentKeyRequirement.PREFERRED, user_verification=UserVerificationRequirement.REQUIRED),
+        exclude_credentials=[PublicKeyCredentialDescriptor(id=base64url_to_bytes(p["cred_id"])) for p in AUTH.passkeys()])
+    return {"cid": cid, "options": json.loads(webauthn.options_to_json(opts))}
+
+
+class RegFinish(BaseModel):
+    cid: str
+    credential: dict
+    name: str = "Passkey"
+
+
+@app.post("/api/auth/register/finish")
+def register_finish(body: RegFinish, request: Request):
+    got = AUTH.take_challenge(body.cid, "register")
+    if not got:
+        raise HTTPException(400, "took too long: try again")
+    ch, extra = got
+    signed_in = _session_of(request)
+    if not signed_in and not AUTH.use_enroll_code(extra.get("code") or ""):
+        raise HTTPException(403, "this link has expired or was already used: make a new one")
+    try:
+        v = webauthn.verify_registration_response(credential=body.credential, expected_challenge=ch,
+                                                  expected_rp_id=_rp_id(request), expected_origin=_origin(request),
+                                                  require_user_verification=True)
+    except Exception as e:  # noqa: BLE001 - InvalidRegistrationResponse and parse errors
+        raise HTTPException(400, f"passkey not accepted: {e}")
+    cred = bytes_to_base64url(v.credential_id)
+    AUTH.add_passkey(cred, v.credential_public_key, v.sign_count, body.name or "Passkey")
+    return _signed_in(request, cred) if not signed_in else {"ok": True}
+
+
+@app.post("/api/auth/login/begin")
+def login_begin(request: Request):
+    cid, ch = AUTH.new_challenge("login")
+    opts = webauthn.generate_authentication_options(
+        rp_id=_rp_id(request), challenge=ch, timeout=120000, user_verification=UserVerificationRequirement.REQUIRED,
+        allow_credentials=[PublicKeyCredentialDescriptor(id=base64url_to_bytes(p["cred_id"])) for p in AUTH.passkeys()])
+    return {"cid": cid, "options": json.loads(webauthn.options_to_json(opts))}
+
+
+class LoginFinish(BaseModel):
+    cid: str
+    credential: dict
+
+
+@app.post("/api/auth/login/finish")
+def login_finish(body: LoginFinish, request: Request):
+    got = AUTH.take_challenge(body.cid, "login")
+    if not got:
+        raise HTTPException(400, "took too long: try again")
+    pk = AUTH.passkey(body.credential.get("id") or body.credential.get("rawId") or "")
+    if not pk:
+        raise HTTPException(401, "this passkey isn't registered here")
+    try:
+        v = webauthn.verify_authentication_response(
+            credential=body.credential, expected_challenge=got[0], expected_rp_id=_rp_id(request),
+            expected_origin=_origin(request), credential_public_key=pk["pubkey"],
+            credential_current_sign_count=pk["sign_count"], require_user_verification=True)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(401, f"sign-in failed: {e}")
+    AUTH.used_passkey(pk["cred_id"], v.new_sign_count)
+    return _signed_in(request, pk["cred_id"])
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request):
+    s = _session_of(request)
+    if s:
+        ep = AUTH.end_session(s["token_hash"])
+        if ep:
+            db.del_sub(ep)
+    r = JSONResponse({"ok": True})
+    r.delete_cookie(authmod.SESSION_COOKIE, path="/")
+    return r
+
+
+# ---------- account: devices, passkeys, tokens (signed-in browsers only) ----------
+def _need_session(request: Request) -> dict:
+    who = getattr(request.state, "principal", None)
+    if authmod.enabled() and (not who or who.get("kind") != "session"):
+        raise HTTPException(403, "only a signed-in browser can manage devices")
+    return who or {}
+
+
+@app.get("/api/account")
+def account(request: Request):
+    me = _need_session(request)
+    return {"me": me.get("token_hash"),
+            "sessions": [{**s, "id": s.pop("token_hash")} for s in AUTH.sessions()],
+            "passkeys": AUTH.passkeys(),
+            "tokens": [{**t, "id": t.pop("token_hash")} for t in AUTH.tokens()],
+            "hide_push_text": db.get_setting("push_hide_text", False)}
+
+
+@app.post("/api/account/device-link")
+def device_link(request: Request):
+    _need_session(request)
+    return {"code": AUTH.new_enroll_code(authmod.DEVICE_LINK_MINUTES), "minutes": authmod.DEVICE_LINK_MINUTES}
+
+
+@app.delete("/api/account/sessions/{sid}")
+def revoke_session(sid: str, request: Request):
+    _need_session(request)
+    ep = AUTH.end_session(sid)
+    if ep:
+        db.del_sub(ep)
+    return {"ok": True}
+
+
+class NameIn(BaseModel):
+    name: str
+
+
+@app.post("/api/account/passkeys/{cred_id}")
+def rename_passkey(cred_id: str, body: NameIn, request: Request):
+    _need_session(request)
+    AUTH.rename_passkey(cred_id, body.name)
+    return {"ok": True}
+
+
+@app.delete("/api/account/passkeys/{cred_id}")
+def delete_passkey(cred_id: str, request: Request):
+    _need_session(request)
+    if not AUTH.remove_passkey(cred_id):
+        raise HTTPException(400, "that's your last passkey: add another before removing it")
+    return {"ok": True}
+
+
+class TokenIn(BaseModel):
+    name: str
+    scope: str
+
+
+@app.post("/api/account/tokens")
+def create_token(body: TokenIn, request: Request):
+    _need_session(request)
+    try:
+        return {"token": AUTH.new_token(body.name, body.scope)}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/account/tokens/{tid}")
+def delete_token(tid: str, request: Request):
+    _need_session(request)
+    AUTH.revoke_token(tid)
+    return {"ok": True}
+
+
+class HideIn(BaseModel):
+    hide: bool
+
+
+@app.post("/api/account/push-privacy")
+def push_privacy(body: HideIn, request: Request):
+    _need_session(request)
+    db.set_setting("push_hide_text", body.hide)
+    return {"ok": True}
 
 
 # ---------- the web app itself (optional) ----------

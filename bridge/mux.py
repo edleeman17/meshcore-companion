@@ -12,11 +12,13 @@ connection and speaks the same framing to any number of clients:
     so one app syncing never steals messages from another. A client's queue is
     kept for QUEUE_KEEP seconds after it disconnects, so a restart loses none.
 
-Run: MUX_RADIO=10.0.0.50 python3 mux.py   (listens on MUX_LISTEN, default 0.0.0.0:5001)
+Run: MUX_RADIO=10.0.0.50 python3 mux.py   (listens on MUX_LISTEN, default 0.0.0.0:5001;
+     MUX_ALLOW=127.0.0.1,10.0.0.7 limits which IPs may connect)
 """
 import asyncio
 import collections
 import logging
+import logging.handlers
 import os
 import time
 
@@ -139,7 +141,14 @@ class Mux:
 
     async def request(self, cmd: bytes) -> list[bytes]:
         """Send one command and collect its reply frames. Caller holds the radio."""
-        await self.up.wait()
+        try:
+            # never wait forever for a radio that is down: the caller holds the radio, so
+            # every other client would queue behind it, stop reading its socket, never notice
+            # its peer hang up, and leak one fd per reconnect (hit the 1024 limit 2026-11-19)
+            await asyncio.wait_for(self.up.wait(), REPLY_IDLE)
+        except asyncio.TimeoutError:
+            log.warning("radio down: command 0x%02x not sent", cmd[0] if cmd else -1)
+            return []
         self.reply = asyncio.Queue()
         _, w = self.rw
         w.write(frame(b"<", cmd))
@@ -218,6 +227,14 @@ class Mux:
             await asyncio.sleep(2)
 
     async def on_client(self, r, w):
+        # The mux speaks the raw radio protocol (send as you, change settings), so
+        # MUX_ALLOW limits who may connect: comma-separated IPs, empty = anyone.
+        allow = {a.strip() for a in os.environ.get("MUX_ALLOW", "").split(",") if a.strip()}
+        peer = (w.get_extra_info("peername") or ("?",))[0]
+        if allow and peer not in allow:
+            log.warning("refused mux client %s (not in MUX_ALLOW)", peer)
+            w.close()
+            return
         c = Client(self, r, w)
         self.clients.add(c)
         log.info("client %s connected (%d now)", c.name, len(self.clients))
@@ -229,6 +246,39 @@ class Mux:
         await asyncio.gather(server.serve_forever(), self.radio_loop())
 
 
+class RepeatFilter(logging.Filter):
+    """Let each message template through at most once per `every` seconds.
+
+    A failing accept() loop (EMFILE) once logged the same traceback ~2 MB/s and
+    wrote 24 GB; this caps any such loop to one line a minute plus a count."""
+
+    def __init__(self, every=60.0):
+        super().__init__()
+        self.every, self.last, self.dropped = every, {}, collections.Counter()
+
+    def filter(self, record):
+        key = (record.name, record.msg)
+        now = time.monotonic()
+        if now - self.last.get(key, -self.every) < self.every:
+            self.dropped[key] += 1
+            return False
+        self.last[key] = now
+        if n := self.dropped.pop(key, 0):
+            record.msg = f"{record.msg} [{n} repeat(s) suppressed]"
+        return True
+
+
+def setup_logging():
+    path = os.environ.get("MUX_LOG")
+    if path:      # size-capped: 3 x 10 MB at most
+        handler = logging.handlers.RotatingFileHandler(path, maxBytes=10_000_000, backupCount=2)
+    else:
+        handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(message)s"))
+    handler.addFilter(RepeatFilter())
+    logging.basicConfig(level=logging.INFO, handlers=[handler])
+
+
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+    setup_logging()
     asyncio.run(Mux(os.environ["MUX_RADIO"], os.environ.get("MUX_LISTEN", "0.0.0.0:5001")).main())

@@ -1095,3 +1095,29 @@ pre.notes { white-space: pre-wrap; overflow-wrap: anywhere; font: .78rem/1.5 var
   display: grid; place-items: center; font: 700 .7rem/1 var(--mono); }
 .setup li.ok .tick { background: var(--ok); border-color: var(--ok); color: var(--bg); }
 .setup li.ok > span:last-child { color: var(--muted); }
+
+/* signing key page */
+ul.plain { list-style: none; padding: 0; margin: .25rem 0 1rem; }
+ul.plain li { padding: .2rem 0; }
+code.big { display: block; font-size: 1.05rem; letter-spacing: .04em; word-break: break-all; user-select: all; }
+
+/* "new version" banner (iOS home-screen apps don't reload on resume) */
+.new-version { position: fixed; left: 50%; bottom: calc(env(safe-area-inset-bottom) + 5.5rem); transform: translateX(-50%);
+  z-index: 50; padding: .6rem 1rem; border-radius: 999px; border: 0; font: inherit; font-weight: 700;
+  background: var(--accent); color: var(--accent-ink); box-shadow: 0 4px 16px rgb(0 0 0 / .25); cursor: pointer; }
+
+/* passkey sign-in screen */
+.gate { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 1.5rem;
+  background: var(--bg, #fff); }
+body.gated > :not(.gate):not(#toast) { visibility: hidden; }
+.gate-card { max-width: 24rem; width: 100%; }
+.gate-card h1 { font-size: 1.4rem; margin: 0 0 .5rem; }
+.gate-card .btn { width: 100%; margin: .75rem 0; }
+.btn.small { padding: .15rem .5rem; font-size: .85em; margin-left: .4rem; }
+
+/* first-run tour */
+.tour-step { margin: 0; font-size: .8rem; opacity: .7; }
+.tour-dots { display: flex; gap: .35rem; margin: .35rem 0 .75rem; }
+.tour-dots span { width: .5rem; height: .5rem; border-radius: 50%; background: var(--surface-2); }
+.tour-dots span.done { background: var(--accent); opacity: .5; }
+.tour-dots span.now { background: var(--accent); }

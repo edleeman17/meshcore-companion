@@ -353,6 +353,9 @@ class DB:
         rows = self._rows("SELECT pubkey FROM heard WHERE pubkey LIKE ? LIMIT 1", (prefix + "%",))
         return rows[0]["pubkey"] if rows else None
 
+    def all_pubkeys(self) -> list[str]:
+        return [r["pubkey"] for r in self._rows("SELECT pubkey FROM heard WHERE pubkey IS NOT NULL")]
+
     def heard(self, since_ms: int) -> list[dict]:
         return [clean(r) for r in self._rows("SELECT * FROM heard WHERE last_ts>=? ORDER BY last_ts DESC", (since_ms,))]
 

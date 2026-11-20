@@ -10,7 +10,9 @@ After=network-online.target
 WorkingDirectory=%h/meshcore-bridge
 EnvironmentFile=%h/.config/meshcore-bridge.env
 ExecStart=/usr/bin/python3 -u mux.py
-StandardOutput=append:%h/.local/share/meshcore-bridge/mux.log
+# mux.py rotates its own log (3 x 10 MB); crashes still land in the journal
+Environment=MUX_LOG=%h/.local/share/meshcore-bridge/mux.log
+StandardOutput=journal
 StandardError=inherit
 Restart=always
 RestartSec=3

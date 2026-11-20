@@ -16,6 +16,8 @@ from .geo import clean
 from . import discover, filters, inspect, signing, topology
 from .db import DB, now_ms
 
+DEFAULT_CHANNELS = "#meshcore-companion"   # the app's community channel, joined once per install
+
 log = logging.getLogger("radio")
 
 POLL_SECS = 60
@@ -143,6 +145,10 @@ class Radio:
         """Full public key + name for an 8-byte signer key id, from contacts then
         heard adverts. (None, None) if we've never heard that key."""
         kid = keyid.hex()
+        b = self.binding_for(kid)
+        if b:                               # v2 signing key: named after the radio that vouched for it
+            _, rname = self.resolve_signer(bytes.fromhex(b["radio"])[:8])
+            return b["pub"], rname
         for k, c in (self.mc.contacts.items() if self.mc else []):
             if k.lower().startswith(kid):
                 return k, c.get("adv_name")
@@ -153,19 +159,31 @@ class Radio:
         return None, None
 
     def check_signature(self, body: str, chan_name: str, ts: int, keyid: bytes,
-                        sig: bytes, shown_sender: str | None) -> dict:
+                        sig: bytes, shown_sender: str | None, version: int = 1) -> dict:
         """Verify a trailer signature and compare the signing key to the pin for
         the shown name. Returns message fields: signed (keyid hex), signed_name,
         signed_ok (1 valid / 0 invalid), key_state (match|changed|unpinned)."""
         pub, adv_name = self.resolve_signer(keyid)
         out = {"signed": keyid.hex(), "signed_name": adv_name}
-        if not pub or not signing.verify(pub, body, chan_name, ts, sig):
+        b = self.binding_for(keyid.hex()) if version == 2 else None
+        if version == 2:
+            ok = bool(b) and signing.verify_v2(b["pub"], b["radio"], body, chan_name, ts, sig)
+        else:
+            ok = bool(pub) and not self.binding_for(keyid.hex()) and signing.verify(pub, body, chan_name, ts, sig)
+        if not ok:
             out["signed_ok"] = 0        # key unknown or signature doesn't check out
             return out
         out["signed_ok"] = 1
+        if b and b.get("revoked"):
+            out["key_state"] = "revoked"
+            return out
         pins = self.db.get_setting("pinned_keys", {})
         pinned = pins.get(shown_sender or "")
         out["key_state"] = "match" if pinned == pub else ("unpinned" if not pinned else "changed")
+        if version == 1 and self.radio_has_v2(pub):
+            # This radio has a protected (v2) key, so a v1 signature only proves someone
+            # could reach the radio, not that its owner approved the post.
+            out["key_state"] = "radio_only"
         out["signed_name"] = adv_name or (shown_sender if out["key_state"] == "match" else None)
         return out
 
@@ -176,18 +194,25 @@ class Radio:
         if p.get("data_type") != signing.DATA_TYPE:
             return
         try:
-            parsed = signing.unpack(bytes.fromhex(p.get("payload", "")))
+            raw = bytes.fromhex(p.get("payload", ""))
         except ValueError:
             return
+        if raw[:3] == signing.MAGIC_BIND:
+            self._on_binding(raw)
+            return
+        if raw[:3] == signing.MAGIC_REVOKE:
+            self._on_revocation(raw)
+            return
+        parsed = signing.unpack_any(raw)
         if not parsed:
             return
-        keyid, ts, sig = parsed
+        version, keyid, ts, sig = parsed
         idx = p.get("channel_idx", 0)
         row = self.db.find_chan_by_ts(str(idx), ts)
         if row:
-            await self._verify_message_sig(row, keyid, sig)
+            await self._verify_message_sig(row, keyid, sig, version)
         else:                             # text not here yet: hold it briefly
-            self.pending_sigs[(idx, ts)] = (keyid, sig, time.monotonic())
+            self.pending_sigs[(idx, ts)] = (keyid, sig, time.monotonic(), version)
             cutoff = time.monotonic() - 900
             self.pending_sigs = {k: v for k, v in self.pending_sigs.items() if v[2] > cutoff}
 
@@ -195,14 +220,102 @@ class Radio:
         """When a channel text arrives, apply a companion signature that beat it here."""
         held = self.pending_sigs.pop((int(m["peer"]), m.get("sender_ts")), None)
         if held:
-            asyncio.create_task(self._verify_message_sig(m, held[0], held[1]))
+            asyncio.create_task(self._verify_message_sig(m, held[0], held[1], held[3] if len(held) > 3 else 1))
 
-    async def _verify_message_sig(self, m: dict, keyid: bytes, sig: bytes):
+    async def _verify_message_sig(self, m: dict, keyid: bytes, sig: bytes, version: int = 1):
         fields = self.check_signature(m["text"], self.channels.get(int(m["peer"])) or "",
-                                      m.get("sender_ts") or 0, keyid, sig, m.get("sender"))
+                                      m.get("sender_ts") or 0, keyid, sig, m.get("sender"), version)
         row = dict(self.db.update_message(m["id"], **fields))
         row["channel_name"] = self.channels.get(int(m["peer"]))
         await self.hub.publish("message_update", row)
+
+    # ---- v2 signing keys (see signing.py "v2") ----
+    def bindings(self) -> dict:
+        """sign_pub hex -> {pub, radio, ts, revoked}: signing keys radios have vouched for."""
+        return self.db.get_setting("signing_bindings", {})
+
+    def binding_for(self, keyid_hex: str) -> dict | None:
+        for pub, b in self.bindings().items():
+            if pub.startswith(keyid_hex.lower()):
+                return {"pub": pub, **b}
+        return None
+
+    def radio_has_v2(self, radio_pub: str | None) -> bool:
+        return bool(radio_pub) and any(b["radio"] == radio_pub and not b.get("revoked")
+                                       for b in self.bindings().values())
+
+    def _known_radio_keys(self) -> list[str]:
+        keys = set(self.mc.contacts) if self.mc else set()
+        keys |= set(self.db.all_pubkeys())
+        mine = (self.mc.self_info or {}).get("public_key") if self.mc else None
+        if mine:
+            keys.add(mine)
+        return [k.lower() for k in keys if k]
+
+    def _on_binding(self, raw: bytes) -> dict | None:
+        """MCB: a radio vouching for a signing key. Keep it only if it verifies
+        against a radio we've heard; a newer binding replaces an older one."""
+        parsed = signing.unpack_bind(raw)
+        if not parsed:
+            return None
+        pub, ts, rsig = parsed
+        radio = next((k for k in self._known_radio_keys() if signing.verify_bind(k, pub, ts, rsig)), None)
+        if not radio:
+            log.info("signing-key binding from a radio we haven't heard yet; ignored")
+            return None
+        allb = self.bindings()
+        cur = allb.get(pub.hex())
+        if cur and (cur.get("revoked") or cur["ts"] >= ts):
+            return {"pub": pub.hex(), **cur}
+        allb[pub.hex()] = {"radio": radio, "ts": ts, "revoked": 0}
+        self.db.set_setting("signing_bindings", allb)
+        return {"pub": pub.hex(), **allb[pub.hex()]}
+
+    def _on_revocation(self, raw: bytes) -> bool:
+        """MCR: signed by the key it revokes, so only its holder can send it."""
+        parsed = signing.unpack_revoke(raw)
+        if not parsed:
+            return False
+        pub = parsed[0].hex()
+        allb = self.bindings()
+        allb.setdefault(pub, {"radio": "", "ts": parsed[1]})["revoked"] = 1
+        self.db.set_setting("signing_bindings", allb)
+        return True
+
+    async def bind_signing_key(self, sign_pub: bytes) -> bytes:
+        """Ask our radio to vouch for a new signing key; returns the MCB packet."""
+        if not self.connected:
+            raise RuntimeError("radio offline")
+        mine = self.mc.self_info.get("public_key") or ""
+        ts = int(time.time())
+        async with self.lock:
+            ev = await self.mc.commands.sign(signing.bind_input(mine, sign_pub, ts))
+        rsig = ev.payload.get("signature") if ev and ev.type == EventType.SIGNATURE else None
+        if not rsig:
+            raise RuntimeError("the radio wouldn't sign the key binding (needs recent companion firmware)")
+        pkt = signing.pack_bind(sign_pub, ts, rsig)
+        if not self._on_binding(pkt):
+            raise RuntimeError("binding didn't verify against this radio's key")
+        self.db.set_setting("own_binding", {"packet": pkt.hex(), "sent": {}})
+        return pkt
+
+    async def broadcast_signing_packet(self, idx: int, pkt: bytes):
+        async with self.lock:
+            await self.mc.commands.send_channel_data(idx, signing.DATA_TYPE, pkt)
+
+    async def _ensure_binding_sent(self, idx: int):
+        """Send our MCB on a channel before signing there, then at most daily, so
+        listeners can resolve our signing key."""
+        own = self.db.get_setting("own_binding")
+        if not own:
+            return
+        last = own["sent"].get(str(idx), 0)
+        if time.time() - last < 86400:
+            return
+        await self.broadcast_signing_packet(idx, bytes.fromhex(own["packet"]))
+        own["sent"][str(idx)] = int(time.time())
+        self.db.set_setting("own_binding", own)
+        await asyncio.sleep(1.5)       # let the binding clear the air before the post
 
     def hop_name(self, hop_hex: str) -> str | None:
         """Repeater/contact whose key starts with this path hash (best guess, hashes collide)."""
@@ -420,6 +533,7 @@ class Radio:
                 self.max_channels = int(self.device.get("max_channels") or MAX_CHANNELS)
             await self._load_contacts(tries=3)
             await self._load_channels()
+            await self._join_default_channels()
             await self._sync_clock()
         if self._gone.is_set():
             raise RuntimeError("radio link dropped during setup")
@@ -467,6 +581,33 @@ class Radio:
         if abs(self.clock_drift) > 10:
             log.warning("radio clock off by %ss, setting it", self.clock_drift)
             await self.mc.commands.set_time(int(time.time()))
+
+    async def _join_default_channels(self):
+        """Join the app's community channel(s) once per install, so Companion users
+        can find each other. Done only once: if you leave a channel it stays left.
+        DEFAULT_CHANNELS (comma-separated, "" for none) overrides the list.
+        Call with self.lock held."""
+        want = [n.strip().lower() for n in os.environ.get("DEFAULT_CHANNELS", DEFAULT_CHANNELS).split(",") if n.strip()]
+        done = set(self.db.get_setting("default_channels_done", []))
+        todo = [n for n in want if n.startswith("#") and n not in done]
+        if not todo:
+            return
+        have = {v.lower() for v in self.channels.values()}
+        for name in todo:
+            if name not in have:
+                free = [i for i in range(self.max_channels) if i not in self.channels]
+                if not free:
+                    log.info("no free channel slot for %s; skipped", name)
+                    continue                      # try again next connect
+                ev = await self.mc.commands.set_channel(free[0], name, None)
+                if ev is None or ev.type == EventType.ERROR:
+                    log.warning("couldn't join %s: %s", name, ev and ev.payload)
+                    continue
+                self.channels[free[0]] = name
+                log.info("joined default channel %s in slot %d", name, free[0])
+            done.add(name)
+        self.db.set_setting("default_channels_done", sorted(done))
+        self.db.set_setting("channels", self.channels)
 
     async def _load_channels(self):
         found = {}
@@ -594,9 +735,9 @@ class Radio:
         sender = self.name_for(p["pubkey_prefix"])
         if p.get("txt_type") == 2 and p.get("signature"):
             # TXT_TYPE_SIGNED_PLAIN: a room server relaying a post; signature = author's key prefix
-            author = [c.get("adv_name") for k, c in (self.mc.contacts.items() if self.mc else [])
-                      if k.startswith(p["signature"])]
-            sender = author[0] if author else f"{p['signature'][:8]}…"
+            # contacts first, then anyone heard advertising; key stub if neither
+            author = self._signed_fields(p, None).get("signed_name")
+            sender = author or f"{p['signature'][:8]}…"
         if self.db.find_duplicate({"direction": "in", "kind": "dm", "peer": p["pubkey_prefix"],
                                    "sender": sender, "text": p.get("text", ""),
                                    "sender_ts": p.get("sender_timestamp")}):
@@ -854,11 +995,28 @@ class Radio:
                                    rtt_ms=int((time.monotonic() - t0) * 1000) if status == "delivered" else None)
         await self.hub.publish("message_update", m)
 
-    async def send_chan(self, idx: int, text: str, sign: bool = False) -> dict:
+    async def send_chan(self, idx: int, text: str, sign: bool = False, client_sig: dict | None = None) -> dict:
         if not self.connected:
             raise RuntimeError("radio offline")
         signed, sig, ts = {}, None, int(time.time())
-        if sign:
+        own = self.db.get_setting("own_binding")
+        if client_sig:                     # v2: signed in the browser/TUI after a passkey/passphrase unlock
+            ts = int(client_sig["ts"])
+            if abs(time.time() - ts) > 120:
+                raise RuntimeError("signature timestamp is too far from now; sign again")
+            b = self.binding_for(client_sig["keyid"])
+            mine = self.mc.self_info.get("public_key") or ""
+            sig = bytes.fromhex(client_sig["sig"])
+            if not b or b["radio"] != mine.lower() or b.get("revoked"):
+                raise RuntimeError("that signing key isn't bound to this radio")
+            if not signing.verify_v2(b["pub"], mine, text, self.channels.get(idx) or "", ts, sig):
+                raise RuntimeError("signature doesn't verify; nothing sent")
+            await self._ensure_binding_sent(idx)
+            pub = b["pub"]
+            signed = {"signed": pub[:16], "signed_name": self.state()["name"], "signed_ok": 1, "key_state": "mine"}
+        elif sign and own and not self.db.get_setting("allow_radio_sign", False):
+            raise RuntimeError("this radio has a protected signing key: unlock it to sign")
+        if sign and not client_sig:
             chan_name = self.channels.get(idx) or ""
             pub = self.mc.self_info.get("public_key") or ""
             sig_ev = await self.mc.commands.sign(signing.canonical(text, chan_name, ts))
@@ -873,8 +1031,9 @@ class Radio:
             # and full-length. If it fails to send, the post simply shows unsigned.
             if sig and ev.type != EventType.ERROR:
                 try:
-                    await self.mc.commands.send_channel_data(
-                        idx, signing.DATA_TYPE, signing.pack(bytes.fromhex(pub)[:8], ts, sig))
+                    pkt = (signing.pack_v2(bytes.fromhex(pub), ts, sig) if client_sig
+                           else signing.pack(bytes.fromhex(pub)[:8], ts, sig))
+                    await self.mc.commands.send_channel_data(idx, signing.DATA_TYPE, pkt)
                 except Exception as e:  # noqa: BLE001
                     log.warning("companion signature packet not sent: %s", e)
                     signed = {}

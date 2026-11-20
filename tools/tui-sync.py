@@ -23,6 +23,8 @@ from pathlib import Path
 log = logging.getLogger("tui-sync")
 
 BRIDGE = os.environ.get("BRIDGE", "http://localhost:8190").rstrip("/")
+# A "sync" app token when the bridge has passkey login on (Radio > Devices and sign-in)
+TOKEN = os.environ.get("BRIDGE_TOKEN", "")
 TUI_DB = Path(os.environ.get("TUI_DB", "~/.local/share/meshcore-tui/meshcore-tui.db")).expanduser()
 STATE = Path(os.environ.get("STATE", "~/.local/state/meshcore-tui-sync.json")).expanduser()
 INTERVAL = int(os.environ.get("INTERVAL", "10"))
@@ -38,7 +40,8 @@ RANK = {RECEIVED: 0, PENDING: 1, SENT: 2, FAILED: 2, DELIVERED: 3}
 def api(path, body=None):
     req = urllib.request.Request(BRIDGE + path, method="POST" if body is not None else "GET",
                                  data=json.dumps(body).encode() if body is not None else None,
-                                 headers={"Content-Type": "application/json"})
+                                 headers={"Content-Type": "application/json",
+                                          **({"Authorization": f"Bearer {TOKEN}"} if TOKEN else {})})
     with urllib.request.urlopen(req, timeout=20) as r:
         return json.load(r)
 

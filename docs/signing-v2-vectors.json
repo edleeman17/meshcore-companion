@@ -1,0 +1,58 @@
+{
+  "_note": "Fixed inputs; every hex value below must be reproduced exactly. Ed25519 is deterministic.",
+  "inputs": {
+    "signing_seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "radio_seed": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "text": "Meet at the harbour at 6",
+    "channel": "#family",
+    "ts": 1795000000,
+    "passphrase": "kettle orbit lantern fig",
+    "prf_output": "1111111111111111111111111111111111111111111111111111111111111111",
+    "recovery_code": "2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "signing_pub": "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+  "radio_pub": "29acbae141bccaf0b22e1a94d34d0bc7361e526d0bfe12c89794bc9322966dd7",
+  "canonical_v2": "4d657368436f72652d436f6d70616e696f6e207369676e6564206368616e6e656c20763229acbae141bccaf07dc086fd6a4d6565742061742074686520686172626f75722061742036",
+  "signature": "7cb949c37769ab0fa7b6e87994201dd3843a3ae712ab1fb22fe00dbe8aaa3abece3744508833b3085376a94891c307bda2b6e38d169818aa57f30c15b86c480d",
+  "packet_mc2": "4d433203a107bff3ce10bec086fd6a7cb949c37769ab0fa7b6e87994201dd3843a3ae712ab1fb22fe00dbe8aaa3abece3744508833b3085376a94891c307bda2b6e38d169818aa57f30c15b86c480d",
+  "bind_input": "4d657368436f72652d436f6d70616e696f6e206b65792062696e64696e6720763229acbae141bccaf0b22e1a94d34d0bc7361e526d0bfe12c89794bc9322966dd703a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8c086fd6a",
+  "packet_mcb": "4d434203a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8c086fd6a58940370fd86705a24dba0492255edb483258f0add4afcf8cc2e018caa9a8290278b42640b31a11644acaac28d06250188e91ca59e001a5e78c15cf2a4d7fb0a",
+  "packet_mcr": "4d435203a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8fc86fd6ac7d7245dca8d3b01768883cd6c0cb2e9c2b4b62ee2bb6c983d31cd935eda7ba159c497a4da1351b818ca21cc79fc01a8c7dcaf882e52a92deba2fa70f8af4f08",
+  "hmac_secret_salt": "090bf3478aa78d7820dea28731fa65fd2f8adcd60966920809b4c29334e05772",
+  "passphrase_ikm": "e762ddf67cac4de885f01781d23bdde1dd4f26c2ed23c4c0cea31b9a5d45c93f",
+  "keyfile": {
+    "v": 2,
+    "pub": "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+    "created": 1795000000,
+    "slots": [
+      {
+        "type": "passkey",
+        "cred_id": "ZXhhbXBsZS1jcmVkZW50aWFsLWlk",
+        "rp_id": "mesh.lan",
+        "prf_salt": "srKysrKysrKysrKysrKysrKysrKysrKysrKysrKysrI",
+        "salt": "w8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8M",
+        "nonce": "AQEBAQEBAQEBAQEB",
+        "ct": "_Wf7RkFHdzKmN-y-j-FwoVXAWklmdXSRpQn5rQthAeiL9fFJYkLGa5FyZdlHOEwg"
+      },
+      {
+        "type": "passphrase",
+        "kdf": {
+          "alg": "argon2id",
+          "m": 65536,
+          "t": 3,
+          "p": 1
+        },
+        "kdf_salt": "oaGhoaGhoaGhoaGhoaGhoQ",
+        "salt": "xMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMQ",
+        "nonce": "AgICAgICAgICAgIC",
+        "ct": "KL3osesFqrFySr_9SB4FjbtKcvnoFvQK6NHQI4ZHP0MTylYrHkL6t5etT9bYqSzP"
+      },
+      {
+        "type": "recovery",
+        "salt": "xcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcU",
+        "nonce": "AwMDAwMDAwMDAwMD",
+        "ct": "U21l09spomDMXksycQI4f3dSS9JdrjPZV8vZOaRsTp2pe6MP6KDej1fj6ProLMRW"
+      }
+    ]
+  }
+}

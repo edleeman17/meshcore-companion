@@ -50,7 +50,9 @@ class Hub:
             title = f"{title} · {m.get('channel_name') or 'channel ' + m['peer']}"
         move = chess.push_text(m["text"]) if m["kind"] == "dm" else None
         payload = json.dumps({
-            "title": title, "body": move or m["text"][:200],
+            # "Hide message text on lock screen": push services and the lock screen see only who
+            "title": title, "body": ("New message" if self.db.get_setting("push_hide_text", False)
+                                     else move or m["text"][:200]),
             "tag": f"{m['kind']}:{m['peer']}",
             "url": f"/#/chess/{m['peer']}" if move else f"/#/{m['kind']}/{m['peer']}",
             "badge": self.db.unread_total(),
