@@ -4,6 +4,16 @@ server {
   listen 80;
   root /usr/share/nginx/html;
 
+  # app.js, the stylesheet and the bigger API answers (messages, contacts,
+  # stats) shrink 4-8x. text/event-stream is left out so the live stream
+  # isn't held back waiting to fill a gzip block.
+  gzip on;
+  gzip_comp_level 5;
+  gzip_min_length 1024;
+  gzip_proxied any;
+  gzip_vary on;
+  gzip_types application/javascript text/javascript text/css application/json application/manifest+json image/svg+xml;
+
   # API + live stream -> the bridge. SSE needs buffering off and a long read
   # timeout (the bridge pings every 20 s).
   location /api/ {

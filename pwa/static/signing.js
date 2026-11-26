@@ -91,6 +91,7 @@
     return "Use at least 4 random words (e.g. kettle orbit lantern fig) or 16+ varied characters.";
   }
   async function passphraseIkm(pw, salt, a = ARGON2) {
+    if (!root.hashwasm && root.MCLoadScript) await root.MCLoadScript("vendor/argon2.umd.min.js");   // loaded on first use
     const hw = root.hashwasm;
     if (!hw) throw new Error("Argon2 not loaded");
     return hw.argon2id({ password: pw.normalize("NFKC"), salt, parallelism: a.p, iterations: a.t,

@@ -922,9 +922,9 @@ html[data-nav=swap]::view-transition-group(page) { animation-duration: .18s; }
 .ticker { display: grid; gap: .08rem; text-align: left; margin: .5rem var(--pad) 0; padding: .38rem .6rem;
   background: var(--surface); border: 1px solid var(--line); font: .68rem/1.35 var(--mono); color: var(--fg); min-width: 0; }
 .ticker:active { background: var(--surface-2); }
-.tk-line, .tk-hex { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.tk-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .tk-line b { color: var(--link); margin: 0 .35rem; }
-.tk-line .tk-t, .tk-hex { color: var(--muted); }
+.tk-line .tk-t { color: var(--muted); }
 .tk-line .q-good-t { color: var(--ok); } .tk-line .q-ok-t { color: var(--warn); } .tk-line .q-bad-t { color: var(--bad); }
 .ticker.blip { animation: blip .5s var(--ease-out); }
 @keyframes blip { from { box-shadow: inset 3px 0 0 var(--accent); } to { box-shadow: inset 3px 0 0 transparent; } }
@@ -1121,3 +1121,38 @@ body.gated > :not(.gate):not(#toast) { visibility: hidden; }
 .tour-dots span { width: .5rem; height: .5rem; border-radius: 50%; background: var(--surface-2); }
 .tour-dots span.done { background: var(--accent); opacity: .5; }
 .tour-dots span.now { background: var(--accent); }
+
+/* in-flight sends pulse so you can see they're still moving */
+.msg .st-sending.live { animation: st-pulse 1.2s ease-in-out infinite; }
+@keyframes st-pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .msg .st-sending.live { animation: none; } }
+
+/* ---- phones: more chats and messages per screen ---- */
+.m-q { display: none; }
+.map-key-btn { display: none; }
+@media (max-width: 40rem) {
+  .list .row-meta.opt { display: none; }               /* route line: kept in the thread */
+  .m-meta.opt { display: none; }                         /* full route: tap the message */
+  .m-q { display: inline; font: .66rem var(--mono); margin-left: auto; }
+  .toolbar { margin-top: .5rem; }
+  #add-chan { min-width: var(--tap); padding: 0; font-size: 1.2rem; }
+  #add-chan .wide-word { display: none; }
+  /* the ticker becomes one thin line under the header */
+  .ticker { margin: 0; border-width: 0 0 1px; padding: .22rem var(--pad); }
+  /* map key folds into a chip */
+  .map-key-btn { display: block; font: 700 .68rem var(--mono); letter-spacing: .1em; text-transform: uppercase;
+    background: var(--bg); color: var(--fg); border: 1px solid var(--line-strong); padding: .35rem .6rem; min-height: 2rem; }
+  .map-key:not(.open) .map-legend { display: none; }
+  .map-key.open .map-key-btn { margin-bottom: .25rem; }
+}
+/* faint note while the base map draws, so a blank background doesn't look broken */
+.leaflet-container.tiles-loading::after { content: "Loading map…"; position: absolute; inset: 0; display: grid; place-items: center;
+  font: .75rem var(--mono); color: var(--faint); pointer-events: none; z-index: 1; }
+/* Contacts: one Add / share button on the section heading */
+.sub .sub-btn { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 600; }
+/* labelled choices in a sheet (composer +, Add / share) */
+.menu-opts { display: grid; gap: .4rem; margin-top: .8rem; }
+dialog#sheet .menu-opts .btn { display: grid; justify-items: start; justify-content: start; place-content: start; text-align: left; width: 100%; gap: .1rem; padding: .6rem .8rem; }
+.menu-opts small { font-weight: 400; color: var(--muted); font-size: .78rem; }
+.composer .share-card#share-card { font-size: 1.25rem; font-weight: 700; }
+.m-q.q-good-t { color: var(--ok); } .m-q.q-ok-t { color: var(--warn); } .m-q.q-bad-t { color: var(--bad); }

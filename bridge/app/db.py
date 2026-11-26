@@ -93,6 +93,10 @@ class DB:
         self.conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
+        # Every received packet is a write on the event loop. FULL fsyncs each
+        # one, which stalled the whole bridge for seconds on a Raspberry Pi; NORMAL is
+        # still crash-safe in WAL mode (only the last commits can roll back).
+        self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(SCHEMA)
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(messages)")}
         for col, typ in (("echoes", "INTEGER"), ("echo_via", "TEXT"), ("path", "TEXT"),
@@ -346,6 +350,10 @@ class DB:
         return out
 
 
+    def heard_repeaters(self) -> list[tuple[str, str]]:
+        return [(r["pubkey"], r["name"]) for r in
+                self._rows("SELECT pubkey, name FROM heard WHERE type=2 AND name IS NOT NULL AND name!=''")]
+
     def heard_by_prefix(self, prefix: str) -> list[dict]:
         return self._rows("SELECT name, type FROM heard WHERE pubkey LIKE ?", (prefix + "%",))
 
@@ -414,10 +422,15 @@ class DB:
                 for r in self._rows("SELECT * FROM samples WHERE ts>=? ORDER BY ts", (since_ms,))]
 
     def prune(self):
+        """Drop old packets/samples and strip raw frames past RAW_DAYS. Runs in a
+        worker thread. Only the last 2 days before the raw cutoff are rescanned
+        (older rows were stripped by earlier runs): a full scan of the packets
+        table takes seconds on a Raspberry Pi and holds the DB lock."""
         cutoff = now_ms() - RETENTION_DAYS * 86400_000
+        raw_cut = now_ms() - RAW_DAYS * 86400_000
         self._exec("DELETE FROM packets WHERE ts<?", (cutoff,))
-        self._exec("UPDATE packets SET raw=NULL WHERE raw IS NOT NULL AND ts<?",
-                   (now_ms() - RAW_DAYS * 86400_000,))
+        self._exec("UPDATE packets SET raw=NULL WHERE raw IS NOT NULL AND ts<? AND ts>=?",
+                   (raw_cut, raw_cut - 2 * 86400_000))
         self._exec("DELETE FROM samples WHERE ts<?", (cutoff,))
 
     # push + settings

@@ -3,6 +3,13 @@ const $ = (s) => document.querySelector(s);
 // Safari ignores user-scalable=no, so stop pinch-zoom here (maps handle their own gestures)
 for (const ev of ["gesturestart", "gesturechange"]) document.addEventListener(ev, (e) => { if (!e.target.closest?.(".leaflet-container")) e.preventDefault(); }, { passive: false });
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+// The last good copy of the screens' data (state, chats, contacts, recent threads)
+// is kept in the Cache API, so the app paints straight away on open — even with
+// the bridge slow or unreachable — and the fresh copy replaces it a moment later.
+// Off when sign-in is on: nothing shows before the passkey.
+const API_CACHE = "mesh-api";
+const SNAP_RE = /^\/(state|conversations|contacts|pending|delivery|trust|nearby\?hours=24|messages\/(dm|chan)\/[^/?]+)$/;
+const snapOn = () => lsGet("auth-on") !== "1";
 const api = async (path, opts = {}) => {
   const r = await fetch("/api" + path, { headers: { "Content-Type": "application/json" }, ...opts });
   if (!r.ok) {
@@ -10,8 +17,19 @@ const api = async (path, opts = {}) => {
     if (r.status === 401 && j.auth) showGate();      // signed out or revoked: back to the sign-in screen
     throw new Error(j.detail || r.statusText);
   }
+  if (!opts.method && SNAP_RE.test(path) && snapOn() && self.caches) {
+    const copy = r.clone();
+    caches.open(API_CACHE).then((c) => c.put("/api" + path, copy)).catch(() => {});
+  }
   return r.json();
 };
+// The saved copy of a GET, or null. Resolves in a few ms.
+const peek = async (path) => {
+  if (!snapOn() || !self.caches) return null;
+  try { const r = await caches.match("/api" + path, { cacheName: API_CACHE }); return r ? await r.json() : null; }
+  catch { return null; }
+};
+const forgetSnapshot = () => self.caches?.delete(API_CACHE).catch(() => {});
 // Over-the-air round-trips to a node (login, status, telemetry, trace, path
 // discovery) often time out on the first try over a marginal link — retry.
 const apiOTA = async (path, opts = {}, tries = 4) => {
@@ -376,18 +394,39 @@ const convRow = (c) => {
   const cls = (c.unread ? " unread" : "") + (muted ? " muted-conv" : "");
   const cur = S.route[0] === c.kind && S.route[1] === c.peer ? ` aria-current="true"` : "";
   const meta = convMeta(c);
+  // Phones drop this line to fit more chats; a failed send keeps it so it isn't missed.
+  const keep = c.last_dir === "out" && c.last_meta?.status === "failed";
   return `<a href="#/${c.kind}/${esc(c.peer)}" class="${cls.trim()}"${cur}>
     ${c.kind === "chan" ? `<span class="badge chan">#</span>` : av(name, contactByPrefix(c.peer)?.type, presenceDot(contactByPrefix(c.peer)))}
-    <span class="meta"><div class="name">${esc(name)}${muted ? muteIco : ""}</div><div class="last">${lastLine(c)}</div>${meta ? `<div class="row-meta">${meta}</div>` : ""}</span>
+    <span class="meta"><div class="name">${esc(name)}${muted ? muteIco : ""}</div><div class="last">${lastLine(c)}</div>${meta ? `<div class="row-meta${keep ? "" : " opt"}">${meta}</div>` : ""}</span>
     <span class="when">${c.last_ts ? ago(c.last_ts) : ""}${c.mentions || c.unread ? `<span class="marks">${c.mentions ? '<span class="at" title="You were mentioned">@</span>' : ""}${c.unread ? `<span class="count-badge">${c.unread}</span>` : ""}</span>` : ""}</span></a>`;
 };
 
+// Contacts change rarely (the stream says when): refetch at most every 30 s.
+let contactsAt = 0, contactsP = null;
+function refreshContacts(force = false) {
+  if (!force && contactsP) return contactsP;
+  if (!force && Date.now() - contactsAt < 30_000) return Promise.resolve(S.contacts);
+  contactsP = api("/contacts").then((c) => { S.contacts = c; contactsAt = Date.now(); return c; })
+    .finally(() => { contactsP = null; });
+  return contactsP;
+}
 async function loadConvs() {
-  try { [S.convs, S.contacts] = await Promise.all([api("/conversations"), api("/contacts")]); }
+  const my = nav;
+  // Saved copy first, so the list is there the instant the app opens.
+  if (!S.convs.length) { const c = await peek("/conversations"); if (c && !S.convs.length && my === nav) { S.convs = c; renderConvs(); } }
+  const ct = refreshContacts().catch(() => null);
+  try { S.convs = await api("/conversations"); }
   catch (err) {
     if (!S.convs.length) $("#convs").innerHTML = `<p class="empty">Can't reach the bridge right now. Your chats will appear when it's back.</p>`;
     return;
   }
+  renderConvs();
+  loadDiscovered();
+  const before = S.contacts;
+  ct.then(() => { if (S.contacts !== before && $("#convs").offsetParent) renderConvs(); });
+}
+function renderConvs() {
   const notify = new Set(S.state?.notify_channels || []);
   setBadge(S.convs.reduce((n, c) => n + (c.muted_until != null ? 0 : c.kind === "dm" || notify.has(c.peer) ? c.unread : c.mentions), 0));
   syncMuteBtn();
@@ -402,7 +441,6 @@ async function loadConvs() {
   $("#quiet-wrap").hidden = !quiet.length;
   $("#quiet-count").textContent = quiet.length ? `(${quiet.length})` : "";
   $("#quiet").innerHTML = quiet.map(convRow).join("");
-  loadDiscovered();
   const people = S.contacts.filter((c) => c.type === 1 && !seen.has(`dm:${c.prefix}`));
   $("#people-wrap").hidden = !people.length;
   $("#people").innerHTML = people.map((c) => `<a href="#/dm/${c.prefix}"${S.route[0] === "dm" && S.route[1] === c.prefix ? ` aria-current="true"` : ""}>
@@ -510,7 +548,14 @@ async function openThread(kind, peer) {
   if (S.thread.length) { S.lastRead = 0; renderThread(true); early = true; }
   const readP = api(`/read/${kind}/${encodeURIComponent(peer)}`).then((r) => r.last_read || 0, () => 0);
   const rowsP = fetchThread(kind, peer);
-  if (!early) navWait = Promise.all([readP, rowsP]).then(() => new Promise(requestAnimationFrame), () => {});
+  if (!early) {
+    // Not in memory: the saved copy from last time paints in a few ms; the fresh one follows.
+    const savedP = showHidden ? Promise.resolve(false) : peek(`/messages/${kind}/${encodeURIComponent(peer)}`).then((saved) => {
+      if (!saved?.length || my !== nav || S.thread.length) return false;
+      S.thread = saved; S.lastRead = 0; renderThread(true); early = true; return true;
+    });
+    navWait = savedP.then((ok) => ok || Promise.all([readP, rowsP])).then(() => new Promise(requestAnimationFrame), () => {});
+  }
   const last = await readP;
   if (my !== nav) return;
   S.lastRead = last;
@@ -641,6 +686,7 @@ function dmStatusTip(m) {
 
 function chanStatusTip(m) {
   if (m.status === "failed") return "The radio couldn't send it. Resend.";
+  if (m.status === "sending") return "Waiting its turn on the radio.";
   if (m.echoes) return `${m.echoes} repeater${m.echoes === 1 ? "" : "s"} rebroadcast it — it's out on the mesh. Channels have no read receipt, so this is as confirmed as delivery gets.`;
   if (Date.now() - m.ts < 60000) return "Sent to the mesh, waiting to hear a repeater carry it.";
   return "No repeater was heard rebroadcasting it, so it didn't get out of your area. Resend.";
@@ -688,14 +734,16 @@ function msgHtml(m, reacts = null, fresh = new Set()) {
   const dmEcho = m.direction === "out" && m.kind === "dm" && m.status !== "delivered" && m.echoes != null
     ? `<span>${m.echoes ? `↺ repeated ×${m.echoes}` : "↺ not repeated yet"}</span>` : "";
   const chanStale = m.kind === "chan" && m.status === "sent" && !m.echoes && Date.now() - m.ts > 60000;
-  const echo = m.direction === "out" && m.kind === "chan" && (m.status === "sent" || m.status === "failed")
-    ? (m.status === "failed"
+  const echo = m.direction === "out" && m.kind === "chan"
+    ? (m.status === "sending"
+        ? `<span class="st-sending live" title="Waiting its turn on the radio">⋯ sending to radio</span>`
+        : m.status === "failed"
         ? `<span class="st-failed" title="${esc(chanStatusTip(m))}">✗ not sent</span>`
         : m.echoes
           ? `<span class="st-delivered" title="${esc(chanStatusTip(m))}">✓ on mesh · ↺ ×${m.echoes}${m.echo_via ? ` via ${esc(m.echo_via)}` : ""}</span>`
           : chanStale
             ? `<span class="st-failed" title="${esc(chanStatusTip(m))}">✗ not picked up</span>`
-            : `<span class="st-sending" title="${esc(chanStatusTip(m))}">sending…</span>`)
+            : `<span class="st-sending live" title="${esc(chanStatusTip(m))}">↗ sent · listening for repeats</span>`)
     : "";
   const roomAuthor = m.direction === "in" && m.kind === "dm" && m.sender && m.sender !== contactName(m.peer);
   const badge = m.verified ? ` <span class="verified" title="Route matches the sender you confirmed">✓</span>` : "";
@@ -705,7 +753,10 @@ function msgHtml(m, reacts = null, fresh = new Set()) {
   const canMention = m.direction === "in" && (m.kind === "chan" || roomAuthor) && m.sender;
   const who = m.direction === "out" ? `<span class="who me">You</span>`
     : `<span class="who tint"${canMention ? ` data-mention="${esc(m.sender)}"` : ""}${tint(author)}>${esc(author)}</span>`;
-  const head = `<div class="m-head"><span class="m-time">${hhmm(m.ts)}</span>${who}${m.direction === "in" ? badge + signedBadge : ""}</div>`;
+  // Phones show only SNR (in the head row) and drop the route line unless something is
+  // wrong; tapping the message opens the full route.
+  const quick = m.direction === "in" && m.snr != null ? `<span class="m-q ${snrT(m.snr)}">SNR ${fmtDb(m.snr)}</span>` : "";
+  const head = `<div class="m-head"><span class="m-time">${hhmm(m.ts)}</span>${who}${m.direction === "in" ? badge + signedBadge : ""}${quick}</div>`;
   const canResend = m.direction === "out" && (m.status === "failed" ||
     (m.kind === "chan" && m.status === "sent" && !m.echoes && Date.now() - m.ts > 60000));
   const resendLabel = m.kind === "dm" && m.status === "failed" && m.echoes ? "↻ Send again anyway" : "↻ Resend";
@@ -721,7 +772,7 @@ function msgHtml(m, reacts = null, fresh = new Set()) {
     : (m.kind === "chan" ? echo : st + dmEcho) + rtt;
   const usual = m.key_state === "unsigned_usual" ? " usual" : "";
   return `<div class="msg ${m.direction}${m.mention ? " mention" : ""}${usual}${m.hidden ? " is-hidden" : ""}${arrive}" data-id="${m.id}"><span class="swipe-ico" aria-hidden="true">↩</span>${head}<div class="text">${chessChip(m) || renderText(m.text)}</div>
-    ${reactsHtml(reacts, fresh, m.id)}${meta ? `<div class="m-meta">${meta}</div>` : ""}${failHint}${chanHint}${resend}</div>`;
+    ${reactsHtml(reacts, fresh, m.id)}${meta ? `<div class="m-meta${m.direction === "in" && !m.warn ? " opt" : ""}">${meta}</div>` : ""}${failHint}${chanHint}${resend}</div>`;
 }
 
 // The sheet slides away rather than vanishing. Every close goes through this,
@@ -741,6 +792,12 @@ sheetEl.addEventListener("submit", (e) => {
   if (e.target.method !== "dialog") return;
   e.preventDefault(); sheetEl.close(e.submitter?.value ?? "");
 });
+// A short list of labelled choices; each runs once the sheet has closed.
+function menuSheet(title, items) {
+  showSheet(`<h3 id="sheet-title" tabindex="-1" autofocus>${esc(title)}</h3><div class="menu-opts">${items.map(([label, hint], i) =>
+    `<button type="button" class="btn" data-menu="${i}"><b>${esc(label)}</b>${hint ? `<small>${esc(hint)}</small>` : ""}</button>`).join("")}</div>`);
+  $("#sheet-body").querySelectorAll("[data-menu]").forEach((b) => (b.onclick = () => { $("#sheet").close(); items[+b.dataset.menu][2](); }));
+}
 function showSheet(html, { noClose = false } = {}) {
   const d = $("#sheet");
   if (sheetOut) { sheetOut.cancel(); sheetOut = null; d.classList.remove("closing"); }
@@ -911,6 +968,7 @@ function msgDetails(m) {
 // Hop bytes (1 per repeater) are matched to a known node's pubkey for coords;
 // unlocated hops are listed but skipped on the line.
 async function routeMap(m) {
+  await need("leaflet");
   if (!S.contacts.length) S.contacts = await api("/contacts");
   let nearby = []; try { nearby = await api("/nearby?hours=720"); } catch { /* optional */ }
   const byKey = {};
@@ -1226,14 +1284,19 @@ text.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#composer").requestSubmit(); }
   else if (e.key === "Escape" && reply) { e.preventDefault(); e.stopPropagation(); clearReply(); }
 });
-$("#share-card").onclick = () => {
+function insertCard() {
   const s = S.state;
   if (!s?.public_key) return toast("Radio not connected yet.", "err");
   const card = `<${s.public_key}:1:${(s.name || "me").slice(0, 31)}>`;
   const pos = text.selectionStart ?? text.value.length;
   text.value = (text.value.slice(0, pos) + (pos && !/\s$/.test(text.value.slice(0, pos)) ? " " : "") + card + " " + text.value.slice(pos)).slice(0, 200);
   text.focus(); text.dispatchEvent(new Event("input"));
-};
+}
+// "+" in the composer: the rarer extras, with words, so a stray tap can't drop your card in.
+$("#share-card").onclick = () => menuSheet("Add to this message", [
+  ["Insert my contact card", "Lets them save you as a contact", insertCard],
+  ...(S.route?.[0] === "chan" ? [[signOn ? "Stop signing" : "Sign this message", "Proves it's really you; must fit one packet", () => setSign(!signOn)]] : []),
+]);
 
 // Sign toggle: only on channel posts. A signed post proves it's really you and
 // must fit one packet (the signature eats ~100 bytes), so it can't be split.
@@ -1245,12 +1308,13 @@ function setSign(on) {
   signOn = on;
   signBtn.classList.toggle("on", on);
   signBtn.setAttribute("aria-pressed", on ? "true" : "false");
+  signBtn.hidden = !on;   // shown only while on, so you can see it and tap it off
   text.dispatchEvent(new Event("input"));   // refresh the counter for the signed budget
 }
 signBtn.onclick = () => setSign(!signOn);
 function showSignToggle() {
   const isChan = S.route?.[0] === "chan";
-  signBtn.hidden = !isChan;
+  signBtn.hidden = !isChan || !signOn;
   if (!isChan) setSign(false);
 }
 
@@ -1266,18 +1330,23 @@ $("#composer").onsubmit = async (e) => {
   btn.classList.remove("sent"); void btn.offsetWidth; btn.classList.add("sent");
   clearReply();
   text.value = ""; text.dispatchEvent(new Event("input"));
+  // Show it in the thread at once; the bridge's copy (over the stream) replaces it.
+  const local = { id: `local-${Date.now()}`, local: true, kind, peer, direction: "out", text: body, ts: Date.now(), status: "sending", sender: S.state?.name };
+  const dropLocal = () => { const n = S.thread.length; S.thread = S.thread.filter((x) => x !== local); if (S.thread.length !== n) renderThread(); };
+  if (S.threadKey === `${kind}:${peer}`) { S.thread.push(local); renderThread(true); }
   requestAnimationFrame(() => (scroller().scrollTop = 1e9));
   try {
     // v2: with a protected key, unlock it (passkey or passphrase) and sign here
     const sig = sign ? await signV2(peer, body) : null;
     if (sign && sig === false) throw new Error("not signed");
     await api("/send", { method: "POST", body: JSON.stringify({ kind, to: peer, text: body, sign: sign && !sig, sig }) });
+    setTimeout(dropLocal, 8000);   // the stream missed it: the next refresh has the real one
   }
-  catch (err) { fail(err, "Not sent"); text.value = body; text.dispatchEvent(new Event("input")); }
+  catch (err) { dropLocal(); fail(err, "Not sent"); text.value = body; text.dispatchEvent(new Event("input")); }
 };
 
 // ---------- live stream ----------
-let es = null, lastEvent = 0;
+let es = null, lastEvent = 0, streamOpened = 0;
 function connectStream() {
   try { es?.close(); } catch { /* already closed */ }
   es = new EventSource("/api/stream");
@@ -1295,7 +1364,7 @@ function connectStream() {
   on("message_update", (e) => onMessage(JSON.parse(e.data), true));
   on("sample", (e) => { if (S.state) S.state.latest = JSON.parse(e.data); renderStrip(); if (S.route[0] === "radio") renderRadio(); });
   on("packet", (e) => { const p = JSON.parse(e.data); setTicker(p); onPacket(p); });
-  on("contacts", () => { api("/contacts").then((c) => { S.contacts = c; }).catch(() => {}); loadContactsSoon(); });
+  on("contacts", () => { refreshContacts(true).then(() => { if ($("#convs").offsetParent) renderConvs(); }, () => {}); loadContactsSoon(); });
   on("alert", (e) => { const d = JSON.parse(e.data); toast(`${d.title} — ${d.body}`); if (S.route[0] === "radio") renderBatteryList(); });
   on("channel_found", () => { if (S.route[0] === "chats") loadDiscovered(); });
   on("pending", () => { refreshState().catch(() => {}); loadContactsSoon(); });
@@ -1303,9 +1372,10 @@ function connectStream() {
   es.onerror = () => {
     api("/auth/me").then((me) => { if (me.auth && !me.signed_in) showGate(); }, () => {});
     $("#conn").textContent = "Offline"; $("#conn").className = "pill down";
-    $("#offline").hidden = false; $("#offline").textContent = "Can't reach the bridge — reconnecting…";
+    $("#offline").hidden = false;
+    $("#offline").textContent = snapOn() ? "Can't reach the bridge — showing saved messages, reconnecting…" : "Can't reach the bridge — reconnecting…";
   };
-  es.onopen = () => { lastEvent = Date.now(); refreshState().catch(() => {}); };
+  es.onopen = () => { lastEvent = Date.now(); if (streamOpened++) refreshState().catch(() => {}); };   // boot already fetched it the first time
 }
 
 // iOS suspends the page in the background and silently kills the stream, so
@@ -1320,6 +1390,8 @@ function onMessage(m, update = false) {
   const [kind, peer] = S.route;
   if (kind === "chess" && m.kind === "dm" && m.peer === peer && parseChess(m.text)) { loadChess(); return; }
   if (m.kind === kind && m.peer === peer) {
+    // Our own message is back from the bridge: it takes the local bubble's place.
+    if (m.direction === "out" && !update) S.thread = S.thread.filter((x) => !x.local || !(x.text === m.text || x.text.startsWith(m.text.slice(0, 24))));
     const i = S.thread.findIndex((x) => x.id === m.id);
     if (i >= 0) S.thread[i] = m; else if (!update) S.thread.push(m);
     markRead(kind, peer);
@@ -1514,8 +1586,7 @@ window.addEventListener("resize", debounce(fitStrip, 200));
 calmMq.addEventListener?.("change", fitStrip);
 
 // ---------- live ticker ----------
-// The last packet the radio heard: what and where from on one line, its first bytes on the
-// next. Under the header on the phone's Chats screen; along the bottom on a desktop.
+// The last packet the radio heard, on one line (its bytes are in Live packets). Under the header on the phone's Chats screen; along the bottom on a desktop.
 function setTicker(p) {
   S.tick = p;
   const via = p.heard_from && p.heard_from !== "direct" ? `via ${p.heard_from}` : p.path_len === 0 ? "direct" : "";
@@ -1523,7 +1594,6 @@ function setTicker(p) {
   $("#tk-line").innerHTML = `<span class="tk-t">${hhmm(p.ts)}</span><b>${esc(p.ptype || "?")}</b>${esc(p.text || "")}`
     + (where ? `<span class="tk-t"> · ${esc(where)}</span>` : "")
     + (p.snr != null ? ` · <span class="${snrT(p.snr)}">SNR ${fmtDb(p.snr)}</span>${p.rssi != null ? ` RSSI ${p.rssi}` : ""}` : "");
-  $("#tk-hex").textContent = p.raw ? p.raw.toUpperCase().match(/../g).join(" ") + (p.raw.length >= 96 ? " …" : "") : "";
   showTicker();
   const t = $("#ticker"); t.classList.remove("blip"); void t.offsetWidth; t.classList.add("blip");
 }
@@ -1640,6 +1710,7 @@ $("#range").onclick = (e) => {
 
 const charts = {};
 function plot(id, data, series, opts = {}) {
+  if (!window.uPlot) { need("uplot").then(() => plot(id, data, series, opts), () => {}); return; }
   const el = $(id);
   charts[id]?.destroy();
   const fg = css("--muted"), grid = css("--line");
@@ -1663,13 +1734,13 @@ async function loadStats() {
     const vc = { solid: "q-good", good: "q-good", ok: "q-ok", marginal: "q-ok", poor: "q-bad", bad: "q-bad" }[health.verdict] || "q-none";
     const b = health.best;
     const grade = (cls, word) => `<span class="chip ${cls}">${word}</span>`;
-    const errG = health.err_pct == null ? "" : health.err_pct < 20 ? grade("q-good", "good") : health.err_pct < 40 ? grade("q-ok", "ok") : grade("q-bad", "bad");
+    const errG = health.err_pct == null ? "" : health.err_pct < 20 ? grade("q-good", "good") : health.err_pct < 40 ? grade("q-ok", "fair") : grade("q-bad", "bad");
     const airG = (health.tx_pct_last_hour ?? 0) < 5 ? grade("q-good", "good") : (health.tx_pct_last_hour < 10 ? grade("q-ok", "near limit") : grade("q-bad", "over limit"));
     const snrG = b ? grade(qClass(b.snr_avg), qWord(b.snr_avg)) : "";
     $("#health").innerHTML = `<div class="health">
-      <div class="verdict ${vc}">${esc(health.verdict || "–")}</div>
+      <div class="verdict ${vc}">${esc({ ok: "fair" }[health.verdict] || health.verdict || "–")}</div>
       <div>Best repeater: <b>${esc(b?.name || "–")}</b> ${b ? `<b>${b.snr_avg} dB</b> ${snrG}` : ""}<br><small>${SNR_SCALE}</small></div>
-      <div>Packets lost: <b>${health.err_pct ?? "–"}%</b> ${errG}<br><small>lower is better · under 20% good</small></div>
+      <div>Packets lost: <b>${health.err_pct ?? "–"}%</b> ${errG}<br><small>lower is better · under 20% good, 20–40% fair</small></div>
       <div>Noise floor: <b>${health.noise_floor ?? "–"} dBm</b><br><small>compare with your own history (some boards read high)</small></div>
       <div>Your airtime: <b>${health.tx_pct_last_hour ?? 0}%</b> ${airG}<br><small>duty-cycle limit 10%</small></div>
       <div class="hint" style="grid-column:1/-1">Judged on the last hour. Charts below show the selected range.</div></div>`;
@@ -1818,15 +1889,26 @@ $("#nearby-range").onclick = (e) => {
   loadContacts();
 };
 
+const CONTACT_PATHS = ["/contacts", "/pending", "/nearby?hours=24", "/delivery", "/trust"];
+let contactsShown = false;
 async function loadContacts() {
-  let contacts, pending, near, deliv, ver;
-  try {
-    [contacts, pending, near, deliv, ver] = await Promise.all([api("/contacts"), api("/pending"),
-      api("/nearby?hours=24"), api("/delivery"), api("/trust")]);
-  } catch {
-    if (!S.contacts.length) $("#contact-list").innerHTML = `<p class="empty">Can't reach the bridge right now.</p>`;
+  const my = nav;
+  const fresh = Promise.all(CONTACT_PATHS.map((p) => api(p)));
+  if (!contactsShown) {   // first visit: the saved copy while the bridge answers
+    const saved = await Promise.all(CONTACT_PATHS.map(peek));
+    if (saved.every(Boolean) && !contactsShown && my === nav) renderContacts(saved);
+  }
+  let d;
+  try { d = await fresh; }
+  catch {
+    if (!contactsShown) $("#contact-list").innerHTML = `<p class="empty">Can't reach the bridge right now.</p>`;
     return;
   }
+  contactsAt = Date.now();
+  renderContacts(d);
+}
+function renderContacts([contacts, pending, near, deliv, ver]) {
+  contactsShown = true;
   S.contacts = contacts;
   S.nearBy = new Map(near.map((n) => [n.pubkey, n]));
   const max = S.state?.device?.max_contacts;
@@ -1901,6 +1983,11 @@ async function shareUri(uri, title) {
   }
 }
 $("#my-uri-top").onclick = () => $("#my-uri").click();
+$("#add-share").onclick = () => menuSheet("Add or share a contact", [
+  ["Scan a QR code", "Add someone from their screen", () => $("#scan-qr").click()],
+  ["Show my QR code", "Let someone add you", () => $("#my-qr").click()],
+  ["Share my link", "Copy a meshcore:// link to send", () => $("#my-uri").click()],
+]);
 $("#my-uri").onclick = async () => {
   try { const r = await api("/self/uri"); shareUri(r.uri, "My MeshCore contact"); } catch (err) { fail(err, "Couldn't get your contact link"); }
 };
@@ -1912,6 +1999,12 @@ const loadScript = (src) => scripts[src] ||= new Promise((ok, bad) => {
   s.onerror = () => { delete scripts[src]; bad(new Error("couldn't load " + src)); };
   document.head.appendChild(s);
 });
+// Libraries only some screens use load the first time one opens (the service
+// worker already holds them, so that's a parse, not a download), keeping the
+// app's own start-up small.
+const VENDOR = { leaflet: "vendor/leaflet.js", uplot: "vendor/uPlot.iife.min.js", chess: "vendor/chess.min.js" };
+const need = (lib) => loadScript(VENDOR[lib]);
+window.MCLoadScript = loadScript;   // signing.js loads Argon2 the same way
 
 async function showQr(title, uri, sub = "") {
   await loadScript("vendor/qrcode.js");
@@ -2448,6 +2541,7 @@ function chessGames(rows) {
 const CH = { rows: [], game: null, sel: null, flip: false };
 async function loadChess() {
   const peer = S.route[1], my = nav;
+  try { await need("chess"); } catch (err) { return fail(err, "Couldn't load chess"); }
   try { const rows = await api(`/chess/${encodeURIComponent(peer)}`); if (my !== nav) return; CH.rows = rows; }
   catch { if (my === nav) $("#ch-status").textContent = "Can't load the game — the bridge isn't reachable."; return; }
   renderChess();
@@ -2850,13 +2944,19 @@ function mapStyle() {
 // Adds the themed base map to a Leaflet map; falls back to the raster tiles.
 const glBases = new Set();
 async function addBaseLayer(m) {
+  // A faint "Loading map…" until the first tiles are drawn, so pins on a blank
+  // background don't look broken.
+  const box = m.getContainer(), done = () => box.classList.remove("tiles-loading");
+  box.classList.add("tiles-loading");
   const raster = () => L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-    { maxZoom: 18, attribution: OSM, className: "tiles-raster" }).addTo(m);
+    { maxZoom: 18, attribution: OSM, className: "tiles-raster" }).once("load", done).addTo(m);
   if (!hasWebGL) return raster();
   try {
     await loadMapLibre();
     if (!m._container?.isConnected) return;                 // sheet closed while loading
     const gl = L.maplibreGL({ style: mapStyle() }).addTo(m);
+    const ml = gl.getMaplibreMap?.();
+    if (ml) ml.once("idle", done); else done();
     glBases.add(gl);
     m.on("unload", () => glBases.delete(gl));
   } catch (e) {
@@ -2880,7 +2980,10 @@ const pin = (kind, { filled = true, size = 14, colour } = {}) => L.divIcon({
 
 // Node pins drawn on one shared canvas: a busy area has 800+ nodes, and that many
 // HTML pins makes older phones stutter. Same shapes as the CSS pins and legend.
-const ShapeMarker = L.CircleMarker.extend({
+// Built on first use: Leaflet itself loads when a map first opens.
+let ShapeMarkerClass;
+function ShapeMarker(...a) { return new (ShapeMarkerClass ||= makeShapeMarker())(...a); }
+const makeShapeMarker = () => L.CircleMarker.extend({
   _updatePath() {
     const r = this._renderer;
     if (!r._drawing || this._empty()) return;
@@ -2904,6 +3007,8 @@ const pinScale = () => (map && map.getZoom() < 10 ? .65 : 1);
 let map, layer, legend, trails, links, mapNodes = [];
 async function showMap() {
   const my = nav;
+  try { await need("leaflet"); } catch (err) { return fail(err, "Couldn't load the map"); }
+  if (my !== nav) return;
   if (!map) {
     map = L.map("map", { zoomControl: true, attributionControl: true }).setView([S.state?.lat || 51.5, S.state?.lon || -0.1], S.state?.lat ? 11 : 6);
     addBaseLayer(map);
@@ -2918,8 +3023,12 @@ async function showMap() {
     layer = L.layerGroup().addTo(map);
     legend = L.control({ position: "bottomleft" });
     legend.onAdd = () => {
-      const d = L.DomUtil.create("div", "map-legend");
-      d.id = "map-legend";
+      // Phones start with the key folded into a small chip so it doesn't cover the map.
+      const d = L.DomUtil.create("div", "map-key" + (wide ? " open" : ""));
+      d.innerHTML = `<button type="button" class="map-key-btn" aria-expanded="${wide}">Key</button><div class="map-legend" id="map-legend"></div>`;
+      const b = d.firstElementChild;
+      b.onclick = () => { const o = d.classList.toggle("open"); b.setAttribute("aria-expanded", String(o)); };
+      L.DomEvent.disableClickPropagation(d);
       return d;
     };
     legend.addTo(map);
@@ -3594,10 +3703,17 @@ document.addEventListener("keydown", (e) => {
 // ---------- boot ----------
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => { /* offline cache is optional */ });
 (async () => {
-  await authGate();
-  try { await refreshState(); S.contacts = await api("/contacts"); } catch { /* bridge down: still render */ }
-  connectStream();
+  // Paint from the saved copy first; the bridge (on a busy Pi it can stall for
+  // seconds) is asked for everything at once, in the background.
+  const [st, ct] = await Promise.all([peek("/state"), peek("/contacts")]);
+  if (st && !S.state) S.state = st;
+  if (ct && !S.contacts.length) S.contacts = ct;
+  const gate = authGate();
+  if (!snapOn()) await gate;   // sign-in on: nothing shows before the passkey
   go();
+  connectStream();
+  refreshState().catch(() => {});
+  refreshContacts(true).catch(() => {});
   syncPush();
   if (!lsGet("tour-v1") && !/^#\/enroll\//.test(location.hash)) setTimeout(() => runTour(), 800);
   api("/packets?limit=1").then((r) => { if (r[0] && !S.tick) setTicker(r[0]); }, () => {});
@@ -3805,6 +3921,9 @@ async function reloadApp() {
   } catch { /* reload anyway */ }
   location.reload();
 }
+// The app opens from the service worker's cache; it says when the copy it just
+// fetched behind that is a newer app.js.
+navigator.serviceWorker?.addEventListener("message", (e) => { if (e.data?.type === "new-version") $("#new-version").hidden = false; });
 $("#new-version").onclick = reloadApp;
 $("#reload-app").onclick = reloadApp;
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") checkForNewVersion(); });
@@ -3887,6 +4006,8 @@ function showGate() {
 async function authGate() {
   let me;
   try { me = await api("/auth/me"); } catch { return; }      // bridge down: the offline banner covers it
+  // Sign-in on: keep no saved copy of messages on this device (see API_CACHE).
+  if (me.auth !== (lsGet("auth-on") === "1")) { lsSet("auth-on", me.auth ? "1" : null); if (me.auth) forgetSnapshot(); }
   const enrolling = /^#\/enroll\//.test(location.hash);
   if ((me.auth && !me.signed_in) || enrolling) await showGate();   // enrol works before login is switched on
   if (gateWaiters) gateWaiters.booted = true; else gateWaiters = { booted: true };
@@ -3926,7 +4047,7 @@ async function loadAccount() {
       if (t.dataset.end) {
         const mine = t.dataset.end === a.me;
         if (!await confirmSheet(mine ? "Sign out of this device?" : "Sign that device out?", mine ? "" : "It will need a passkey to get back in, and stops getting notifications.", "Sign out", true)) return;
-        if (mine) { await api("/auth/logout", { method: "POST" }); return location.reload(); }
+        if (mine) { await api("/auth/logout", { method: "POST" }); await forgetSnapshot(); return location.reload(); }
         await api(`/account/sessions/${t.dataset.end}`, { method: "DELETE" });
       } else if (t.dataset.del) {
         if (!await confirmSheet("Remove this passkey?", "Devices signed in with it are signed out.", "Remove", true)) return;

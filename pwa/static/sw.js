@@ -1,8 +1,9 @@
-// Service worker: cache the app shell (API always goes to network) + Web Push.
+// Service worker: app shell served from cache at once and refreshed behind (the
+// page keeps its own saved copy of API data, see API_CACHE in app.js) + Web Push.
 // Caches are shared across the whole origin, so name them per scope: a /beta/
 // preview must never delete production's cache (or vice versa).
 const SCOPE = self.registration.scope;
-const SHELL = "mesh-v71@" + SCOPE;
+const SHELL = "mesh-v74@" + SCOPE;
 const isRoot = new URL(SCOPE).pathname === "/";
 // Relative to this worker, so the same build works at / and in a /beta/ preview.
 const FILES = ["./", "index.html", "app.js", "style.css", "manifest.webmanifest",
@@ -50,10 +51,25 @@ self.addEventListener("fetch", (e) => {
     return;
   }
   if (url.origin !== self.location.origin || url.pathname.startsWith("/api/")) return;
-  // Network first so deploys show up straight away; cache when offline.
-  e.respondWith(fetch(e.request)
-    .then((r) => { const copy = r.clone(); caches.open(SHELL).then((c) => c.put(e.request, copy)); return r; })
-    .catch(() => caches.match(e.request).then((r) => r || caches.match("index.html"))));
+  // Stale-while-revalidate: answer from the cache straight away (no waiting on
+  // the network to open the app), fetch the latest behind it for next time.
+  // When app.js itself changed, tell the page so it can offer "New version".
+  const nav = e.request.mode === "navigate";
+  e.respondWith(caches.open(SHELL).then(async (c) => {
+    const hit = await c.match(nav ? "index.html" : e.request, { ignoreSearch: nav });
+    const net = fetch(e.request).then((r) => {
+      if (r.ok && r.type === "basic") {
+        if (url.pathname.endsWith("/app.js") && hit) {
+          const was = hit.headers.get("etag") || hit.headers.get("last-modified"), now = r.headers.get("etag") || r.headers.get("last-modified");
+          if (was && now && was !== now) self.clients.matchAll({ type: "window" }).then((ws) => ws.forEach((w) => w.postMessage({ type: "new-version" })));
+        }
+        e.waitUntil(c.put(nav ? "index.html" : e.request, r.clone()));
+      }
+      return r;
+    });
+    if (hit) { e.waitUntil(net.catch(() => {})); return hit; }
+    return net.catch(() => c.match("index.html").then((r) => r || Response.error()));
+  }));
 });
 
 self.addEventListener("push", (e) => {

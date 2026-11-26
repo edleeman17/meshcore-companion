@@ -38,7 +38,7 @@
   <button class="hdr-btn" id="find-btn" aria-label="Go anywhere" title="Go anywhere (Ctrl+K)"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></button>
 </header>
 <!-- Latest thing the radio heard: under the header on Chats (phones), along the bottom on desktop -->
-<button type="button" id="ticker" class="ticker" hidden aria-label="Latest packet — open Live packets"><span class="tk-line" id="tk-line"></span><span class="tk-hex" id="tk-hex"></span></button>
+<button type="button" id="ticker" class="ticker" hidden aria-label="Latest packet — open Live packets"><span class="tk-line" id="tk-line"></span></button>
 
 <div id="offline" class="banner" hidden role="alert"></div>
 <main>
@@ -47,7 +47,7 @@
     <div id="setup" class="setup" hidden></div>
     <div class="toolbar">
       <input id="search" class="search" type="search" placeholder="Search messages" autocomplete="off" aria-label="Search messages">
-      <button id="add-chan" type="button" class="btn" aria-expanded="false">+ Channel</button>
+      <button id="add-chan" type="button" class="btn" aria-expanded="false" aria-label="Add a channel" title="Add a channel">+<span class="wide-word"> Channel</span></button>
     </div>
     <form id="add-chan-form" class="form panel" hidden>
       <label>Channel name or link
@@ -85,7 +85,7 @@
     <div id="hidden-bar" class="hint" hidden></div>
     <div id="msgs" class="msgs" aria-live="polite"></div>
     <form id="composer" class="composer">
-      <button type="button" id="share-card" class="share-card" aria-label="Insert my contact card" title="Insert my contact card">👤</button>
+      <button type="button" id="share-card" class="share-card" aria-label="Add a contact card or signature" title="Contact card, signing">+</button>
       <button type="button" id="sign-toggle" class="share-card" hidden aria-pressed="false" aria-label="Sign this message" title="Sign this message so people can verify it's really you">🔏</button>
       <textarea id="text" rows="1" maxlength="700" placeholder="Message" enterkeyhint="send" aria-label="Message"></textarea>
       <span id="count" class="count" aria-live="polite">140</span>
@@ -95,12 +95,12 @@
 
   <!-- Contacts -->
   <section id="v-contacts" class="view" hidden>
-    <div class="row-actions btn-row">
+    <div class="row-actions btn-row" hidden>
       <button id="scan-qr" class="btn sm primary">Scan QR code</button>
       <button id="my-qr" class="btn sm">My QR code</button>
       <button id="my-uri-top" class="btn sm">Share my link</button>
     </div>
-    <h2 class="sub">Your contacts <small id="contact-count"></small></h2>
+    <h2 class="sub">Your contacts <small id="contact-count"></small><button type="button" id="add-share" class="btn sm sub-btn">Add / share</button></h2>
     <div class="contact-tools">
       <input id="contact-search" class="search" type="search" placeholder="Search contacts" autocomplete="off" aria-label="Search contacts">
       <div class="seg" id="ctype" role="tablist">
@@ -398,10 +398,6 @@
   <a href="#/radio" data-tab="radio"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="8" width="14" height="13"/><path d="M9 8l6-5M9 13h6M9 17h6"/></svg>Radio</a>
 </nav>
 
-<script src="vendor/uPlot.iife.min.js"></script>
-<script src="vendor/leaflet.js"></script>
-<script src="vendor/chess.min.js"></script>
-<script src="vendor/argon2.umd.min.js"></script>
 <script src="signing.js"></script>
 <script src="app.js"></script>
 </body>

@@ -97,6 +97,11 @@ def _rp_id(request: Request) -> str:
     return os.environ.get("RP_ID") or urlparse(_origin(request)).hostname
 
 
+# Messages, contacts and stats answers shrink 4-8x (the live stream is left alone).
+from starlette.middleware.gzip import GZipMiddleware  # noqa: E402
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+
 @app.middleware("http")
 async def require_login(request: Request, call_next):
     if not authmod.enabled():
@@ -1368,8 +1373,23 @@ def _hops(path: str, size: int) -> set[str]:
     return {path[i:i + 2 * size] for i in range(0, len(path), 2 * size)}
 
 
+_stats_cache: dict[str, tuple[float, dict]] = {}
+
+
 @app.get("/api/stats")
 def stats(range: str = "24h"):
+    """Charts for Signal and Radio. Building them reads every packet in the range
+    (about a second for 24 h on a Pi), so a result is reused for 30 s: moving
+    between Signal pages doesn't rebuild it each time."""
+    hit = _stats_cache.get(range)
+    if hit and time.time() - hit[0] < 30:
+        return hit[1]
+    out = _build_stats(range)
+    _stats_cache[range] = (time.time(), out)
+    return out
+
+
+def _build_stats(range: str) -> dict:
     since = now_ms() - RANGES.get(range, 86400) * 1000
     pkts = db.packets(since)
     # Who we actually hear over the air: the last hop of each packet's path

@@ -21,6 +21,7 @@ DEFAULT_CHANNELS = "#meshcore-companion"   # the app's community channel, joined
 log = logging.getLogger("radio")
 
 POLL_SECS = 60
+PRUNE_SECS = 3600
 CONTACTS_SECS = 300
 MAX_CHANNELS = 8
 HEADROOM = 8              # free contact slots to keep on the radio so new adverts still land
@@ -323,7 +324,11 @@ class Radio:
             return None
         names = [c.get("adv_name") for k, c in self.mc.contacts.items() if k.startswith(hop_hex)]
         if not names:   # not a contact: fall back to repeaters we've heard advertise
-            names = [h["name"] for h in self.db.heard_by_prefix(hop_hex) if h.get("type") == 2 and h.get("name")]
+            # cached for a minute: this runs per packet on the event loop
+            hr = getattr(self, "_heard_rep", None)
+            if not hr or time.time() - hr[0] > 60:
+                hr = self._heard_rep = (time.time(), self.db.heard_repeaters())
+            names = [n for k, n in hr[1] if k.startswith(hop_hex)]
         return names[0] if len(names) == 1 else (f"{hop_hex}?" if not names else f"{names[0]}?")
 
     def backfill_signed(self):
@@ -649,6 +654,7 @@ class Radio:
 
     async def _poll_loop(self):
         last_contacts = time.time()
+        last_prune = 0.0
         while True:
             try:
                 sample = {}
@@ -670,7 +676,11 @@ class Radio:
                     self.latest = {"ts": now_ms(), **sample}
                     self.db.add_sample(sample)
                     await self.hub.publish("sample", self.latest)
-                self.db.prune()
+                if time.time() - last_prune > PRUNE_SECS:
+                    # off the event loop: a prune holding the DB lock here froze
+                    # every request (and sends) for seconds, once a minute
+                    await asyncio.to_thread(self.db.prune)
+                    last_prune = time.time()
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
@@ -1025,27 +1035,39 @@ class Radio:
                 raise RuntimeError("the radio wouldn't sign (needs recent companion firmware)")
             signed = {"signed": pub[:16], "signed_name": self.state()["name"],
                       "signed_ok": 1, "key_state": "mine"}
-        async with self.lock:
-            ev = await self.mc.commands.send_chan_msg(idx, text, timestamp=ts)
-            # The signature rides in a separate datagram so the text stays clean
-            # and full-length. If it fails to send, the post simply shows unsigned.
-            if sig and ev.type != EventType.ERROR:
-                try:
-                    pkt = (signing.pack_v2(bytes.fromhex(pub), ts, sig) if client_sig
-                           else signing.pack(bytes.fromhex(pub)[:8], ts, sig))
-                    await self.mc.commands.send_channel_data(idx, signing.DATA_TYPE, pkt)
-                except Exception as e:  # noqa: BLE001
-                    log.warning("companion signature packet not sent: %s", e)
-                    signed = {}
-        status = "failed" if ev.type == EventType.ERROR else "sent"
+        # Show the post straight away as "sending…"; the radio send can wait
+        # behind the poll loop for a few seconds, so it runs in the background.
         m = self.db.add_message(direction="out", kind="chan", peer=str(idx),
-                                sender=self.state()["name"], text=text, status=status, echoes=0, **signed)
+                                sender=self.state()["name"], text=text, status="sending", echoes=0, **signed)
+        await self.hub.publish("message", m)
+        asyncio.create_task(self._post_chan(m["id"], idx, text, ts, sig, pub if sig else None, bool(client_sig)))
+        return m
+
+    async def _post_chan(self, mid: int, idx: int, text: str, ts: int, sig, pub: str | None, v2: bool):
+        status, unsign = "failed", False
+        try:
+            async with self.lock:
+                ev = await self.mc.commands.send_chan_msg(idx, text, timestamp=ts)
+                # The signature rides in a separate datagram so the text stays clean
+                # and full-length. If it fails to send, the post simply shows unsigned.
+                if sig and ev.type != EventType.ERROR:
+                    try:
+                        pkt = (signing.pack_v2(bytes.fromhex(pub), ts, sig) if v2
+                               else signing.pack(bytes.fromhex(pub)[:8], ts, sig))
+                        await self.mc.commands.send_channel_data(idx, signing.DATA_TYPE, pkt)
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("companion signature packet not sent: %s", e)
+                        unsign = True
+            status = "failed" if ev.type == EventType.ERROR else "sent"
+        except Exception as e:  # noqa: BLE001
+            log.warning("channel send failed: %s", e)
         if status == "sent":
             # firmware sends "<name>: <text>"; repeats of it heard in the next minute = echoes
-            self.echo_watch[m["id"]] = {"text": f'{self.state()["name"]}: {text}', "until": time.time() + 60,
-                                        "count": 0, "via": set(), "seen": set()}
-        await self.hub.publish("message", m)
-        return m
+            self.echo_watch[mid] = {"text": f'{self.state()["name"]}: {text}', "until": time.time() + 60,
+                                    "count": 0, "via": set(), "seen": set()}
+        extra = {"signed": None, "signed_name": None, "signed_ok": None, "key_state": None} if unsign else {}
+        m = self.db.update_message(mid, status=status, ts=now_ms(), **extra)
+        await self.hub.publish("message_update", m)
 
     async def command(self, name: str, *args):
         if not self.connected:

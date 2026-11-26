@@ -49,13 +49,14 @@ class Hub:
         if m["kind"] == "chan":
             title = f"{title} · {m.get('channel_name') or 'channel ' + m['peer']}"
         move = chess.push_text(m["text"]) if m["kind"] == "dm" else None
+        badge = await asyncio.to_thread(self.db.unread_total)   # slow query: keep it off the event loop
         payload = json.dumps({
             # "Hide message text on lock screen": push services and the lock screen see only who
             "title": title, "body": ("New message" if self.db.get_setting("push_hide_text", False)
                                      else move or m["text"][:200]),
             "tag": f"{m['kind']}:{m['peer']}",
             "url": f"/#/chess/{m['peer']}" if move else f"/#/{m['kind']}/{m['peer']}",
-            "badge": self.db.unread_total(),
+            "badge": badge,
         })
         for sub in self.db.subs():
             await asyncio.to_thread(self._push_one, sub, payload)
